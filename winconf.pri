@@ -1,28 +1,28 @@
 # Adapt these paths on Windows
 
 # Point this to the boost include folder
-INCLUDEPATH += $$quote(C:/qBittorrent/boost_1_51_0)
+#INCLUDEPATH += $$quote(C:/qBittorrent/boost_1_51_0)
 # Point this to the libtorrent include folder
-INCLUDEPATH += $$quote(C:/qBittorrent/RC_0_16/include)
+#INCLUDEPATH += $$quote(C:/qBittorrent/RC_0_16/include)
 # Point this to the zlib include folder
-INCLUDEPATH += $$quote(C:/qBittorrent/Zlib/include)
+#INCLUDEPATH += $$quote(C:/qBittorrent/Zlib/include)
 # Point this to the openssl include folder
-INCLUDEPATH += $$quote(C:/qBittorrent/openssl/include)
+#INCLUDEPATH += $$quote(C:/qBittorrent/openssl/include)
 
 # Point this to the boost lib folder
-LIBS += $$quote(-LC:/qBittorrent/boost_1_51_0/stage/lib)
+LIBS += $$quote(-LC:/msys64/mingw64/lib)
 # Point this to the libtorrent lib folder
-LIBS += $$quote(-LC:/qBittorrent/RC_0_16/bin/path-according-to-the-build-options-chosen)
+#LIBS += $$quote(-LC:/qBittorrent/RC_0_16/bin/path-according-to-the-build-options-chosen)
 # Point this to the zlib lib folder
-LIBS += $$quote(-LC:/qBittorrent/Zlib/lib)
+#LIBS += $$quote(-LC:/qBittorrent/Zlib/lib)
 # Point this to the openssl lib folder
-LIBS += $$quote(-LC:/qBittorrent/openssl/lib)
+#LIBS += $$quote(-LC:/qBittorrent/openssl/lib)
 
 # BOOST DEFINES
 DEFINES += BOOST_ALL_NO_LIB
 DEFINES += BOOST_ASIO_HASH_MAP_BUCKETS=1021
 # Disable this if building against libtorrent 1.1.x (RC_1_1)
-DEFINES += BOOST_ASIO_SEPARATE_COMPILATION
+#DEFINES += BOOST_ASIO_SEPARATE_COMPILATION
 # After 1.55 some Windows users reported regular UI freezes.
 # This makes ASIO use the pre-1.56 way of doing things. See issue #2003
 DEFINES += BOOST_ASIO_DISABLE_CONNECTEX

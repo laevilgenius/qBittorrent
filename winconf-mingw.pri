@@ -22,14 +22,14 @@ CONFIG(debug, debug|release) {
   LIBS += libtorrent-rasterbar \
           libboost_system-mt \
           libboost_filesystem-mt \
-          libboost_thread_win32-mt
+          libboost_thread-mt
 } else {
   LIBS += libtorrent-rasterbar \
           libboost_system-mt \
           libboost_filesystem-mt \
-          libboost_thread_win32-mt
+          libboost_thread-mt
 }
 
-LIBS += libadvapi32 libshell32 libuser32
+LIBS += libadvapi32 libshell32 libuser32 libole32 liboleaut32
 LIBS += libcrypto libssl libwsock32 libws2_32 libz libiconv
 LIBS += libpowrprof
