@@ -244,6 +244,8 @@ namespace BitTorrent
         QString rootPath(bool actual = false) const;
         QString contentPath(bool actual = false) const;
 
+        bool useTempPath() const;
+
         bool isAutoTMMEnabled() const;
         void setAutoTMMEnabled(bool enabled);
         QString category() const;
@@ -416,13 +418,12 @@ namespace BitTorrent
         void handleStatsAlert(libtorrent::stats_alert *p);
 
         bool isMoveInProgress() const;
-        bool useTempPath() const;
         QString nativeActualSavePath() const;
 
         void adjustActualSavePath();
         void adjustActualSavePath_impl();
-        void move_impl(QString path);
-        void moveStorage(const QString &newPath);
+        void move_impl(QString path, bool overwrite);
+        void moveStorage(const QString &newPath, bool overwrite);
         void manageIncompleteFiles();
         bool addTracker(const TrackerEntry &tracker);
         bool addUrlSeed(const QUrl &urlSeed);
@@ -437,11 +438,16 @@ namespace BitTorrent
 
         InfoHash m_hash;
 
-        QString m_oldPath;
-        QString m_newPath;
-        // m_queuedPath is where files should be moved to,
-        // when current moving is completed
-        QString m_queuedPath;
+        struct
+        {
+            QString oldPath;
+            QString newPath;
+            // queuedPath is where files should be moved to,
+            // when current moving is completed
+            QString queuedPath;
+            bool queuedOverwrite = true;
+        } m_moveStorageInfo;
+
         // m_moveFinishedTriggers is activated only when the following conditions are met:
         // all file rename jobs complete, all file move jobs complete
         QQueue<EventTrigger> m_moveFinishedTriggers;

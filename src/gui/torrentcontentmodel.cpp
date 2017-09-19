@@ -32,14 +32,20 @@
 #include <QFileIconProvider>
 #include <QFileInfo>
 #include <QIcon>
+#include <QMap>
 
-#ifdef Q_OS_WIN
+#if defined(Q_OS_WIN)
 #include <Windows.h>
 #include <Shellapi.h>
 #include <QtWin>
 #else
 #include <QMimeDatabase>
 #include <QMimeType>
+#endif
+
+#if defined Q_OS_WIN || defined Q_OS_MAC
+#define QBT_PIXMAP_CACHE_FOR_FILE_ICONS
+#include <QPixmapCache>
 #endif
 
 #include "guiiconprovider.h"
@@ -49,6 +55,9 @@
 #include "torrentcontentmodelitem.h"
 #include "torrentcontentmodelfolder.h"
 #include "torrentcontentmodelfile.h"
+#ifdef Q_OS_MAC
+#include "macutilities.h"
+#endif
 
 namespace
 {
@@ -62,6 +71,7 @@ namespace
     {
     public:
         using QFileIconProvider::icon;
+
         QIcon icon(const QFileInfo &info) const override
         {
             Q_UNUSED(info);
@@ -69,23 +79,78 @@ namespace
             return cached;
         }
     };
-#ifdef Q_OS_WIN
-    // See QTBUG-25319 for explanation why this is required
-    class WinShellFileIconProvider: public UnifiedFileIconProvider
+
+#ifdef QBT_PIXMAP_CACHE_FOR_FILE_ICONS
+    struct Q_DECL_UNUSED PixmapCacheSetup
+    {
+        static const int PixmapCacheForIconsSize = 2 * 1024 * 1024; // 2 MiB for file icons
+
+        PixmapCacheSetup()
+        {
+            QPixmapCache::setCacheLimit(QPixmapCache::cacheLimit() + PixmapCacheForIconsSize);
+        }
+
+        ~PixmapCacheSetup()
+        {
+            Q_ASSERT(QPixmapCache::cacheLimit() > PixmapCacheForIconsSize);
+            QPixmapCache::setCacheLimit(QPixmapCache::cacheLimit() - PixmapCacheForIconsSize);
+        }
+    };
+
+    PixmapCacheSetup pixmapCacheSetup;
+
+    class CachingFileIconProvider: public UnifiedFileIconProvider
     {
     public:
         using QFileIconProvider::icon;
-        QIcon icon(const QFileInfo &info) const override
+
+        QIcon icon(const QFileInfo &info) const final override
         {
+            const QString ext = info.suffix();
+            if (!ext.isEmpty()) {
+                QPixmap cached;
+                if (QPixmapCache::find(ext, &cached)) return QIcon(cached);
+
+                const QPixmap pixmap = pixmapForExtension(ext);
+                if (!pixmap.isNull()) {
+                    QPixmapCache::insert(ext, pixmap);
+                    return QIcon(pixmap);
+                }
+            }
+            return UnifiedFileIconProvider::icon(info);
+        }
+
+    protected:
+        virtual QPixmap pixmapForExtension(const QString &ext) const = 0;
+    };
+#endif
+
+#if defined(Q_OS_WIN)
+    // See QTBUG-25319 for explanation why this is required
+    class WinShellFileIconProvider final: public CachingFileIconProvider
+    {
+        QPixmap pixmapForExtension(const QString &ext) const override
+        {
+            const QString extWithDot = QLatin1Char('.') + ext;
             SHFILEINFO sfi = { 0 };
-            HRESULT hr = ::SHGetFileInfoW(info.absoluteFilePath().toStdWString().c_str(),
+            HRESULT hr = ::SHGetFileInfoW(extWithDot.toStdWString().c_str(),
                 FILE_ATTRIBUTE_NORMAL, &sfi, sizeof(sfi), SHGFI_ICON | SHGFI_USEFILEATTRIBUTES);
             if (FAILED(hr))
-                return UnifiedFileIconProvider::icon(info);
+                return QPixmap();
 
             QPixmap iconPixmap = QtWin::fromHICON(sfi.hIcon);
             ::DestroyIcon(sfi.hIcon);
-            return QIcon(iconPixmap);
+            return iconPixmap;
+        }
+    };
+#elif defined(Q_OS_MAC)
+    // There is a similar bug on macOS, to be reported to Qt
+    // https://github.com/qbittorrent/qBittorrent/pull/6156#issuecomment-316302615
+    class MacFileIconProvider final: public CachingFileIconProvider
+    {
+        QPixmap pixmapForExtension(const QString &ext) const override
+        {
+            return ::pixmapForExtension(ext, QSize(32, 32));
         }
     };
 #else
@@ -112,6 +177,7 @@ namespace
     class MimeFileIconProvider: public UnifiedFileIconProvider
     {
         using QFileIconProvider::icon;
+
         QIcon icon(const QFileInfo &info) const override
         {
             const QMimeType mimeType = m_db.mimeTypeForFile(info, QMimeDatabase::MatchExtension);
@@ -138,8 +204,10 @@ TorrentContentModel::TorrentContentModel(QObject *parent)
     : QAbstractItemModel(parent)
     , m_rootItem(new TorrentContentModelFolder(QList<QVariant>({ tr("Name"), tr("Size"), tr("Progress"), tr("Download Priority"), tr("Remaining"), tr("Availability") })))
 {
-#ifdef Q_OS_WIN
+#if defined(Q_OS_WIN)
     m_fileIconProvider = new WinShellFileIconProvider();
+#elif defined(Q_OS_MAC)
+    m_fileIconProvider = new MacFileIconProvider();
 #else
     static bool doesBuiltInProviderWork = doesQFileIconProviderWork();
     m_fileIconProvider = doesBuiltInProviderWork ? new QFileIconProvider() : new MimeFileIconProvider();
@@ -226,7 +294,7 @@ bool TorrentContentModel::setData(const QModelIndex& index, const QVariant& valu
 
     if ((index.column() == TorrentContentModelItem::COL_NAME) && (role == Qt::CheckStateRole)) {
         TorrentContentModelItem *item = static_cast<TorrentContentModelItem*>(index.internalPointer());
-        qDebug("setData(%s, %d", qPrintable(item->name()), value.toInt());
+        qDebug("setData(%s, %d", qUtf8Printable(item->name()), value.toInt());
         if (item->priority() != value.toInt()) {
             if (value.toInt() == Qt::PartiallyChecked)
                 item->setPriority(prio::MIXED);

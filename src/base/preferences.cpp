@@ -161,6 +161,9 @@ void Preferences::setHideZeroComboValues(int n)
     setValue("Preferences/General/HideZeroComboValues", n);
 }
 
+// In Mac OS X the dock is sufficient for our needs so we disable the sys tray functionality.
+// See extensive discussion in https://github.com/qbittorrent/qBittorrent/pull/3018
+#ifndef Q_OS_MAC
 bool Preferences::systrayIntegration() const
 {
     return value("Preferences/General/SystrayEnabled", true).toBool();
@@ -169,26 +172,6 @@ bool Preferences::systrayIntegration() const
 void Preferences::setSystrayIntegration(bool enabled)
 {
     setValue("Preferences/General/SystrayEnabled", enabled);
-}
-
-bool Preferences::isToolbarDisplayed() const
-{
-    return value("Preferences/General/ToolbarDisplayed", true).toBool();
-}
-
-void Preferences::setToolbarDisplayed(bool displayed)
-{
-    setValue("Preferences/General/ToolbarDisplayed", displayed);
-}
-
-bool Preferences::isStatusbarDisplayed() const
-{
-    return value("Preferences/General/StatusbarDisplayed", true).toBool();
-}
-
-void Preferences::setStatusbarDisplayed(bool displayed)
-{
-    setValue("Preferences/General/StatusbarDisplayed", displayed);
 }
 
 bool Preferences::minimizeToTray() const
@@ -209,6 +192,27 @@ bool Preferences::closeToTray() const
 void Preferences::setCloseToTray(bool b)
 {
     setValue("Preferences/General/CloseToTray", b);
+}
+#endif
+
+bool Preferences::isToolbarDisplayed() const
+{
+    return value("Preferences/General/ToolbarDisplayed", true).toBool();
+}
+
+void Preferences::setToolbarDisplayed(bool displayed)
+{
+    setValue("Preferences/General/ToolbarDisplayed", displayed);
+}
+
+bool Preferences::isStatusbarDisplayed() const
+{
+    return value("Preferences/General/StatusbarDisplayed", true).toBool();
+}
+
+void Preferences::setStatusbarDisplayed(bool displayed)
+{
+    setValue("Preferences/General/StatusbarDisplayed", displayed);
 }
 
 bool Preferences::startMinimized() const
@@ -447,6 +451,16 @@ bool Preferences::isWebUiLocalAuthEnabled() const
 void Preferences::setWebUiLocalAuthEnabled(bool enabled)
 {
     setValue("Preferences/WebUI/LocalHostAuth", enabled);
+}
+
+QString Preferences::getServerDomains() const
+{
+    return value("Preferences/WebUI/ServerDomains", "*").toString();
+}
+
+void Preferences::setServerDomains(const QString &str)
+{
+    setValue("Preferences/WebUI/ServerDomains", str);
 }
 
 quint16 Preferences::getWebUiPort() const
@@ -839,12 +853,12 @@ namespace {
                 delete[] lpSubkey;
 
                 if (res == ERROR_SUCCESS) {
-                    qDebug("Detected possible Python v%s location", qPrintable(version));
+                    qDebug("Detected possible Python v%s location", qUtf8Printable(version));
                     path = getRegValue(hkInstallPath);
                     ::RegCloseKey(hkInstallPath);
 
                     if (!path.isEmpty() && QDir(path).exists("python.exe")) {
-                        qDebug("Found python.exe at %s", qPrintable(path));
+                        qDebug("Found python.exe at %s", qUtf8Printable(path));
                         found = true;
                     }
                 }
@@ -917,7 +931,7 @@ bool Preferences::isMagnetLinkAssocSet()
     if (exe_reg.indexIn(shell_command) < 0)
         return false;
     QString assoc_exe = exe_reg.cap(1);
-    qDebug("exe: %s", qPrintable(assoc_exe));
+    qDebug("exe: %s", qUtf8Printable(assoc_exe));
     if (assoc_exe.compare(Utils::Fs::toNativePath(qApp->applicationFilePath()), Qt::CaseInsensitive) != 0)
         return false;
 
@@ -1074,6 +1088,7 @@ void Preferences::setConfirmRemoveAllTags(bool enabled)
     setValue("Preferences/Advanced/confirmRemoveAllTags", enabled);
 }
 
+#ifndef Q_OS_MAC
 TrayIcon::Style Preferences::trayIconStyle() const
 {
     return TrayIcon::Style(value("Preferences/Advanced/TrayIconStyle", TrayIcon::NORMAL).toInt());
@@ -1083,6 +1098,7 @@ void Preferences::setTrayIconStyle(TrayIcon::Style style)
 {
     setValue("Preferences/Advanced/TrayIconStyle", style);
 }
+#endif
 
 // Stuff that don't appear in the Options GUI but are saved
 // in the same file.

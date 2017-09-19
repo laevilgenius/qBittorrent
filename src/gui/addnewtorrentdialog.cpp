@@ -214,7 +214,11 @@ void AddNewTorrentDialog::show(QString source, const BitTorrent::AddTorrentParam
             ok = dlg->loadTorrent(source);
 
         if (ok)
+#ifdef Q_OS_MAC
+            dlg->exec();
+#else
             dlg->open();
+#endif
         else
             delete dlg;
     }
@@ -472,7 +476,7 @@ void AddNewTorrentDialog::renameSelectedFile()
         const QString newFilePath = oldFilePath.leftRef(oldFilePath.size() - oldFileName.size()) + newName;
 
         if (oldFileName == newName) {
-            qDebug("Name did not change: %s", qPrintable(oldFileName));
+            qDebug("Name did not change: %s", qUtf8Printable(oldFileName));
             return;
         }
 
@@ -487,7 +491,7 @@ void AddNewTorrentDialog::renameSelectedFile()
             }
         }
 
-        qDebug("Renaming %s to %s", qPrintable(oldFilePath), qPrintable(newFilePath));
+        qDebug("Renaming %s to %s", qUtf8Printable(oldFilePath), qUtf8Printable(newFilePath));
         m_torrentInfo.renameFile(fileIndex, newFilePath);
 
         m_contentModel->setData(modelIndex, newName);
@@ -531,7 +535,7 @@ void AddNewTorrentDialog::renameSelectedFile()
                 QString newName = currentName;
                 newName.replace(0, oldPath.length(), newPath);
                 newName = Utils::Fs::expandPath(newName);
-                qDebug("Rename %s to %s", qPrintable(currentName), qPrintable(newName));
+                qDebug("Rename %s to %s", qUtf8Printable(currentName), qUtf8Printable(newName));
                 m_torrentInfo.renameFile(i, newName);
             }
         }
@@ -620,10 +624,14 @@ void AddNewTorrentDialog::accept()
 
     QString savePath = ui->savePath->selectedPath();
     if (ui->comboTTM->currentIndex() != 1) { // 0 is Manual mode and 1 is Automatic mode. Handle all non 1 values as manual mode.
+        m_torrentParams.useAutoTMM = TriStateBool::False;
         m_torrentParams.savePath = savePath;
         saveSavePathHistory();
         if (ui->defaultSavePathCheckBox->isChecked())
             BitTorrent::Session::instance()->setDefaultSavePath(savePath);
+    }
+    else {
+        m_torrentParams.useAutoTMM = TriStateBool::True;
     }
 
     setEnabled(!ui->never_show_cb->isChecked());

@@ -81,6 +81,10 @@ OptionsDialog::OptionsDialog(QWidget *parent)
     setAttribute(Qt::WA_DeleteOnClose);
     setModal(true);
 
+#if (defined(Q_OS_UNIX))
+    setWindowTitle(tr("Preferences"));
+#endif
+
     // Icons
     m_ui->tabSelection->item(TAB_UI)->setIcon(GuiIconProvider::instance()->getIcon("preferences-desktop"));
     m_ui->tabSelection->item(TAB_BITTORRENT)->setIcon(GuiIconProvider::instance()->getIcon("preferences-system-network"));
@@ -95,7 +99,8 @@ OptionsDialog::OptionsDialog(QWidget *parent)
 #endif
     m_ui->tabSelection->item(TAB_ADVANCED)->setIcon(GuiIconProvider::instance()->getIcon("preferences-other"));
     for (int i = 0; i < m_ui->tabSelection->count(); ++i) {
-        m_ui->tabSelection->item(i)->setSizeHint(QSize(std::numeric_limits<int>::max(), 64));  // uniform size for all icons
+        // uniform size for all icons
+        m_ui->tabSelection->item(i)->setSizeHint(QSize(std::numeric_limits<int>::max(), 62));
     }
 
     m_ui->IpFilterRefreshBtn->setIcon(GuiIconProvider::instance()->getIcon("view-refresh"));
@@ -143,6 +148,9 @@ OptionsDialog::OptionsDialog(QWidget *parent)
 
     // Load options
     loadOptions();
+#ifdef Q_OS_MAC
+    m_ui->checkShowSystray->setVisible(false);
+#else
     // Disable systray integration if it is not supported by the system
     if (!QSystemTrayIcon::isSystemTrayAvailable()) {
         m_ui->checkShowSystray->setChecked(false);
@@ -150,6 +158,7 @@ OptionsDialog::OptionsDialog(QWidget *parent)
         m_ui->label_trayIconStyle->setVisible(false);
         m_ui->comboTrayIcon->setVisible(false);
     }
+#endif
 
 #if defined(QT_NO_OPENSSL)
     m_ui->checkWebUiHttps->setVisible(false);
@@ -263,6 +272,7 @@ OptionsDialog::OptionsDialog(QWidget *parent)
     m_ui->autoRun_param->setText(autoRunStr);
 
     // Connection tab
+    connect(m_ui->comboProtocol, qComboBoxCurrentIndexChanged, this, &ThisType::enableApplyButton);
     connect(m_ui->spinPort, qSpinBoxValueChanged, this, &ThisType::enableApplyButton);
     connect(m_ui->checkRandomPort, &QAbstractButton::toggled, this, &ThisType::enableApplyButton);
     connect(m_ui->checkUPnP, &QAbstractButton::toggled, this, &ThisType::enableApplyButton);
@@ -278,8 +288,6 @@ OptionsDialog::OptionsDialog(QWidget *parent)
     connect(m_ui->schedule_from, &QDateTimeEdit::timeChanged, this, &ThisType::enableApplyButton);
     connect(m_ui->schedule_to, &QDateTimeEdit::timeChanged, this, &ThisType::enableApplyButton);
     connect(m_ui->schedule_days, qComboBoxCurrentIndexChanged, this, &ThisType::enableApplyButton);
-    connect(m_ui->checkuTP, &QAbstractButton::toggled, this, &ThisType::enableApplyButton);
-    connect(m_ui->checkuTP, &QAbstractButton::toggled, m_ui->checkLimituTPConnections, &QWidget::setEnabled);
     connect(m_ui->checkLimituTPConnections, &QAbstractButton::toggled, this, &ThisType::enableApplyButton);
     connect(m_ui->checkLimitTransportOverhead, &QAbstractButton::toggled, this, &ThisType::enableApplyButton);
     connect(m_ui->checkLimitLocalPeerRate, &QAbstractButton::toggled, this, &ThisType::enableApplyButton);
@@ -331,6 +339,7 @@ OptionsDialog::OptionsDialog(QWidget *parent)
     connect(m_ui->textTrackers, &QPlainTextEdit::textChanged, this, &ThisType::enableApplyButton);
 #ifndef DISABLE_WEBUI
     // Web UI tab
+    connect(m_ui->textServerDomains, &QLineEdit::textChanged, this, &ThisType::enableApplyButton);
     connect(m_ui->checkWebUi, &QGroupBox::toggled, this, &ThisType::enableApplyButton);
     connect(m_ui->spinWebUiPort, qSpinBoxValueChanged, this, &ThisType::enableApplyButton);
     connect(m_ui->checkWebUIUPnP, &QAbstractButton::toggled, this, &ThisType::enableApplyButton);
@@ -466,9 +475,9 @@ void OptionsDialog::saveOptions()
     if (pref->getLocale() != locale) {
         QTranslator *translator = new QTranslator;
         if (translator->load(QString::fromUtf8(":/lang/qbittorrent_") + locale))
-            qDebug("%s locale recognized, using translation.", qPrintable(locale));
+            qDebug("%s locale recognized, using translation.", qUtf8Printable(locale));
         else
-            qDebug("%s locale unrecognized, using default (en).", qPrintable(locale));
+            qDebug("%s locale unrecognized, using default (en).", qUtf8Printable(locale));
         qApp->installTranslator(translator);
     }
 
@@ -478,11 +487,13 @@ void OptionsDialog::saveOptions()
     pref->setAlternatingRowColors(m_ui->checkAltRowColors->isChecked());
     pref->setHideZeroValues(m_ui->checkHideZero->isChecked());
     pref->setHideZeroComboValues(m_ui->comboHideZero->currentIndex());
+#ifndef Q_OS_MAC
     pref->setSystrayIntegration(systrayIntegration());
     pref->setTrayIconStyle(TrayIcon::Style(m_ui->comboTrayIcon->currentIndex()));
     pref->setCloseToTray(closeToTray());
     pref->setMinimizeToTray(minimizeToTray());
     pref->setStartMinimized(startMinimized());
+#endif
     pref->setSplashScreenDisabled(isSlashScreenDisabled());
     pref->setConfirmOnExit(m_ui->checkProgramExitConfirm->isChecked());
     pref->setDontConfirmAutoExit(!m_ui->checkProgramAutoExitConfirm->isChecked());
@@ -561,23 +572,23 @@ void OptionsDialog::saveOptions()
     // End Downloads preferences
 
     // Connection preferences
+    session->setBTProtocol(static_cast<BitTorrent::BTProtocol>(m_ui->comboProtocol->currentIndex()));
     session->setPort(getPort());
     session->setUseRandomPort(m_ui->checkRandomPort->isChecked());
     Net::PortForwarder::instance()->setEnabled(isUPnPEnabled());
     const QPair<int, int> down_up_limit = getGlobalBandwidthLimits();
     session->setGlobalDownloadSpeedLimit(down_up_limit.first);
     session->setGlobalUploadSpeedLimit(down_up_limit.second);
-    session->setUTPEnabled(m_ui->checkuTP->isChecked());
     session->setUTPRateLimited(m_ui->checkLimituTPConnections->isChecked());
     session->setIncludeOverheadInLimits(m_ui->checkLimitTransportOverhead->isChecked());
     session->setIgnoreLimitsOnLAN(!m_ui->checkLimitLocalPeerRate->isChecked());
     const QPair<int, int> alt_down_up_limit = getAltGlobalBandwidthLimits();
     session->setAltGlobalDownloadSpeedLimit(alt_down_up_limit.first);
     session->setAltGlobalUploadSpeedLimit(alt_down_up_limit.second);
-    session->setBandwidthSchedulerEnabled(m_ui->check_schedule->isChecked());
     pref->setSchedulerStartTime(m_ui->schedule_from->time());
     pref->setSchedulerEndTime(m_ui->schedule_to->time());
     pref->setSchedulerDays(static_cast<scheduler_days>(m_ui->schedule_days->currentIndex()));
+    session->setBandwidthSchedulerEnabled(m_ui->check_schedule->isChecked());
 
     auto proxyConfigManager  = Net::ProxyConfigurationManager::instance();
     Net::ProxyConfiguration proxyConf;
@@ -626,6 +637,7 @@ void OptionsDialog::saveOptions()
     // Web UI
     pref->setWebUiEnabled(isWebUiEnabled());
     if (isWebUiEnabled()) {
+        pref->setServerDomains(m_ui->textServerDomains->text());
         pref->setWebUiPort(webUiPort());
         pref->setUPnPForWebUIPort(m_ui->checkWebUIUPnP->isChecked());
         pref->setWebUiHttpsEnabled(m_ui->checkWebUiHttps->isChecked());
@@ -697,12 +709,14 @@ void OptionsDialog::loadOptions()
     m_ui->checkProgramExitConfirm->setChecked(pref->confirmOnExit());
     m_ui->checkProgramAutoExitConfirm->setChecked(!pref->dontConfirmAutoExit());
 
+#ifndef Q_OS_MAC
     m_ui->checkShowSystray->setChecked(pref->systrayIntegration());
     if (m_ui->checkShowSystray->isChecked()) {
         m_ui->checkMinimizeToSysTray->setChecked(pref->minimizeToTray());
         m_ui->checkCloseToSystray->setChecked(pref->closeToTray());
         m_ui->comboTrayIcon->setCurrentIndex(pref->trayIconStyle());
     }
+#endif
 
     m_ui->checkPreventFromSuspend->setChecked(pref->preventFromSuspend());
 
@@ -809,6 +823,7 @@ void OptionsDialog::loadOptions()
     // End Downloads preferences
 
     // Connection preferences
+    m_ui->comboProtocol->setCurrentIndex(static_cast<int>(session->btProtocol()));
     m_ui->checkUPnP->setChecked(Net::PortForwarder::instance()->isEnabled());
     m_ui->checkRandomPort->setChecked(session->useRandomPort());
     m_ui->spinPort->setValue(session->port());
@@ -958,8 +973,6 @@ void OptionsDialog::loadOptions()
         m_ui->spinUploadLimitAlt->setEnabled(false);
     }
 
-    m_ui->checkuTP->setChecked(session->isUTPEnabled());
-    m_ui->checkLimituTPConnections->setEnabled(m_ui->checkuTP->isChecked());
     m_ui->checkLimituTPConnections->setChecked(session->isUTPRateLimited());
     m_ui->checkLimitTransportOverhead->setChecked(session->includeOverheadInLimits());
     m_ui->checkLimitLocalPeerRate->setChecked(!session->ignoreLimitsOnLAN());
@@ -1013,6 +1026,7 @@ void OptionsDialog::loadOptions()
     // End Bittorrent preferences
 
     // Web UI preferences
+    m_ui->textServerDomains->setText(pref->getServerDomains());
     m_ui->checkWebUi->setChecked(pref->isWebUiEnabled());
     m_ui->spinWebUiPort->setValue(pref->getWebUiPort());
     m_ui->checkWebUIUPnP->setChecked(pref->useUPnPForWebUIPort());
@@ -1064,18 +1078,6 @@ int OptionsDialog::getMaxActiveTorrents() const
     return m_ui->spinMaxActiveTorrents->value();
 }
 
-bool OptionsDialog::minimizeToTray() const
-{
-    if (!m_ui->checkShowSystray->isChecked()) return false;
-    return m_ui->checkMinimizeToSysTray->isChecked();
-}
-
-bool OptionsDialog::closeToTray() const
-{
-    if (!m_ui->checkShowSystray->isChecked()) return false;
-    return m_ui->checkCloseToSystray->isChecked();
-}
-
 bool OptionsDialog::isQueueingSystemEnabled() const
 {
     return m_ui->checkEnableQueueing->isChecked();
@@ -1125,11 +1127,25 @@ bool OptionsDialog::startMinimized() const
     return m_ui->checkStartMinimized->isChecked();
 }
 
+#ifndef Q_OS_MAC
 bool OptionsDialog::systrayIntegration() const
 {
     if (!QSystemTrayIcon::isSystemTrayAvailable()) return false;
     return m_ui->checkShowSystray->isChecked();
 }
+
+bool OptionsDialog::minimizeToTray() const
+{
+    if (!m_ui->checkShowSystray->isChecked()) return false;
+    return m_ui->checkMinimizeToSysTray->isChecked();
+}
+
+bool OptionsDialog::closeToTray() const
+{
+    if (!m_ui->checkShowSystray->isChecked()) return false;
+    return m_ui->checkCloseToSystray->isChecked();
+}
+#endif
 
 // Return Share ratio
 qreal OptionsDialog::getMaxRatio() const

@@ -74,6 +74,7 @@ TagFilterWidget::TagFilterWidget(QWidget *parent)
 #if defined(Q_OS_MAC)
     setAttribute(Qt::WA_MacShowFocusRect, false);
 #endif
+    setIndentation(0);
     setContextMenuPolicy(Qt::CustomContextMenu);
     sortByColumn(0, Qt::AscendingOrder);
     setCurrentIndex(model()->index(0, 0));
@@ -155,7 +156,12 @@ void TagFilterWidget::callUpdateGeometry()
 
 QSize TagFilterWidget::sizeHint() const
 {
-    return viewportSizeHint();
+    return {
+        // Width should be exactly the width of the content
+        sizeHintForColumn(0),
+        // Height should be exactly the height of the content
+        static_cast<int>(sizeHintForRow(0) * (model()->rowCount() + 0.5)),
+    };
 }
 
 QSize TagFilterWidget::minimumSizeHint() const

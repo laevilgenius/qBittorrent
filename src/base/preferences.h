@@ -115,16 +115,10 @@ public:
     void setHideZeroValues(bool b);
     int getHideZeroComboValues() const;
     void setHideZeroComboValues(int n);
-    bool systrayIntegration() const;
-    void setSystrayIntegration(bool enabled);
-    bool isToolbarDisplayed() const;
-    void setToolbarDisplayed(bool displayed);
     bool isStatusbarDisplayed() const;
     void setStatusbarDisplayed(bool displayed);
-    bool minimizeToTray() const;
-    void setMinimizeToTray(bool b);
-    bool closeToTray() const;
-    void setCloseToTray(bool b);
+    bool isToolbarDisplayed() const;
+    void setToolbarDisplayed(bool displayed);
     bool startMinimized() const;
     void setStartMinimized(bool b);
     bool isSplashScreenDisabled() const;
@@ -178,6 +172,8 @@ public:
     void setWebUiEnabled(bool enabled);
     bool isWebUiLocalAuthEnabled() const;
     void setWebUiLocalAuthEnabled(bool enabled);
+    QString getServerDomains() const;
+    void setServerDomains(const QString &str);
     quint16 getWebUiPort() const;
     void setWebUiPort(quint16 port);
     bool useUPnPForWebUIPort() const;
@@ -262,8 +258,16 @@ public:
     void setConfirmTorrentRecheck(bool enabled);
     bool confirmRemoveAllTags() const;
     void setConfirmRemoveAllTags(bool enabled);
+#ifndef Q_OS_MAC
+    bool systrayIntegration() const;
+    void setSystrayIntegration(bool enabled);
+    bool minimizeToTray() const;
+    void setMinimizeToTray(bool b);
+    bool closeToTray() const;
+    void setCloseToTray(bool b);
     TrayIcon::Style trayIconStyle() const;
     void setTrayIconStyle(TrayIcon::Style style);
+#endif
 
     // Stuff that don't appear in the Options GUI but are saved
     // in the same file.

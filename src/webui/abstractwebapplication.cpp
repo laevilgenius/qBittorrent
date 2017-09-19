@@ -28,6 +28,8 @@
 
 #include "abstractwebapplication.h"
 
+#include <algorithm>
+
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDebug>
@@ -89,8 +91,11 @@ AbstractWebApplication::AbstractWebApplication(QObject *parent)
     , session_(0)
 {
     QTimer *timer = new QTimer(this);
-    connect(timer, SIGNAL(timeout()), SLOT(removeInactiveSessions()));
+    connect(timer, &QTimer::timeout, this, &AbstractWebApplication::removeInactiveSessions);
     timer->start(60 * 1000);  // 1 min.
+
+    reloadDomainList();
+    connect(Preferences::instance(), &Preferences::changed, this, &AbstractWebApplication::reloadDomainList);
 }
 
 AbstractWebApplication::~AbstractWebApplication()
@@ -115,7 +120,7 @@ Http::Response AbstractWebApplication::processRequest(const Http::Request &reque
     header(Http::HEADER_CONTENT_SECURITY_POLICY, "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self' 'unsafe-inline'; object-src 'none';");
 
     // block cross-site requests
-    if (isCrossSiteRequest(request_)) {
+    if (isCrossSiteRequest(request_) || !validateHostHeader(request_, env, domainList)) {
         status(401, "Unauthorized");
         return response();
     }
@@ -138,7 +143,7 @@ Http::Response AbstractWebApplication::processRequest(const Http::Request &reque
 void AbstractWebApplication::UnbanTimerEvent()
 {
     UnbanTimer* ubantimer = static_cast<UnbanTimer*>(sender());
-    qDebug("Ban period has expired for %s", qPrintable(ubantimer->peerIp().toString()));
+    qDebug("Ban period has expired for %s", qUtf8Printable(ubantimer->peerIp().toString()));
     clientFailedAttempts_.remove(ubantimer->peerIp());
     ubantimer->deleteLater();
 }
@@ -151,6 +156,12 @@ void AbstractWebApplication::removeInactiveSessions()
         if ((now - sessions_[id]->timestamp) > INACTIVE_TIME)
             delete sessions_.take(id);
     }
+}
+
+void AbstractWebApplication::reloadDomainList()
+{
+    domainList = Preferences::instance()->getServerDomains().split(';', QString::SkipEmptyParts);
+    std::for_each(domainList.begin(), domainList.end(), [](QString &entry){ entry = entry.trimmed(); });
 }
 
 bool AbstractWebApplication::sessionInitialize()
@@ -190,7 +201,7 @@ bool AbstractWebApplication::readFile(const QString& path, QByteArray &data, QSt
     else {
         QFile file(path);
         if (!file.open(QIODevice::ReadOnly)) {
-            qDebug("File %s was not found!", qPrintable(path));
+            qDebug("File %s was not found!", qUtf8Printable(path));
             return false;
         }
 
@@ -387,7 +398,7 @@ bool AbstractWebApplication::isCrossSiteRequest(const Http::Request &request) co
                 && (left.host() == right.host()));
     };
 
-    const QString targetOrigin = request.headers.value(Http::HEADER_X_FORWARDED_HOST, request.headers[Http::HEADER_HOST]);
+    const QString targetOrigin = request.headers.value(Http::HEADER_X_FORWARDED_HOST, request.headers.value(Http::HEADER_HOST));
     const QString originValue = request.headers.value(Http::HEADER_ORIGIN);
     const QString refererValue = request.headers.value(Http::HEADER_REFERER);
 
@@ -405,6 +416,44 @@ bool AbstractWebApplication::isCrossSiteRequest(const Http::Request &request) co
         return !isSameOrigin(QUrl::fromUserInput(targetOrigin), refererValue);
 
     return true;
+}
+
+bool AbstractWebApplication::validateHostHeader(const Http::Request &request, const Http::Environment &env, const QStringList &domains) const
+{
+    const QUrl hostHeader = QUrl::fromUserInput(request.headers.value(Http::HEADER_HOST));
+
+    // (if present) try matching host header's port with local port
+    const int requestPort = hostHeader.port();
+    if ((requestPort != -1) && (env.localPort != requestPort))
+        return false;
+
+    // try matching host header with local address
+    const QString requestHost = hostHeader.host();
+
+#if (QT_VERSION >= QT_VERSION_CHECK(5, 8, 0))
+    const bool sameAddr = env.localAddress.isEqual(QHostAddress(requestHost));
+#else
+    const auto equal = [](const Q_IPV6ADDR &l, const Q_IPV6ADDR &r) -> bool {
+        for (int i = 0; i < 16; ++i) {
+            if (l[i] != r[i])
+                return false;
+        }
+        return true;
+    };
+    const bool sameAddr = equal(env.localAddress.toIPv6Address(), QHostAddress(requestHost).toIPv6Address());
+#endif
+
+    if (sameAddr)
+        return true;
+
+    // try matching host header with domain list
+    for (const auto &domain : domains) {
+        QRegExp domainRegex(domain, Qt::CaseInsensitive, QRegExp::Wildcard);
+        if (requestHost.contains(domainRegex))
+            return true;
+    }
+
+    return false;
 }
 
 const QStringMap AbstractWebApplication::CONTENT_TYPE_BY_EXT = {

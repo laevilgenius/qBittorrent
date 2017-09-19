@@ -120,7 +120,7 @@ QByteArray prefjson::getPreferences()
     // Global Rate Limits
     data["dl_limit"] = session->globalDownloadSpeedLimit();
     data["up_limit"] = session->globalUploadSpeedLimit();
-    data["enable_utp"] = session->isUTPEnabled();
+    data["bittorrent_protocol"] = static_cast<int>(session->btProtocol());
     data["limit_utp_rate"] = session->isUTPRateLimited();
     data["limit_tcp_overhead"] = session->includeOverheadInLimits();
     data["alt_dl_limit"] = session->altGlobalDownloadSpeedLimit();
@@ -162,6 +162,7 @@ QByteArray prefjson::getPreferences()
     // Language
     data["locale"] = pref->getLocale();
     // HTTP Server
+    data["web_ui_domain_list"] = pref->getServerDomains();
     data["web_ui_port"] = pref->getWebUiPort();
     data["web_ui_upnp"] = pref->useUPnPForWebUIPort();
     data["use_https"] = pref->isWebUiHttpsEnabled();
@@ -225,10 +226,10 @@ void prefjson::setPreferences(const QString& json)
 
             if (ec == ScanFoldersModel::Ok) {
                 scanDirs.insert(folder, (downloadType == ScanFoldersModel::CUSTOM_LOCATION) ? QVariant(downloadPath) : QVariant(downloadType));
-                qDebug("New watched folder: %s to %s", qPrintable(folder), qPrintable(downloadPath));
+                qDebug("New watched folder: %s to %s", qUtf8Printable(folder), qUtf8Printable(downloadPath));
             }
             else {
-                qDebug("Watched folder %s failed with error %d", qPrintable(folder), ec);
+                qDebug("Watched folder %s failed with error %d", qUtf8Printable(folder), ec);
             }
         }
 
@@ -237,7 +238,7 @@ void prefjson::setPreferences(const QString& json)
             QString folder = folderVariant.toString();
             if (!scanDirs.contains(folder)) {
                 model->removePath(folder);
-                qDebug("Removed watched folder %s", qPrintable(folder));
+                qDebug("Removed watched folder %s", qUtf8Printable(folder));
             }
         }
         pref->setScanDirs(scanDirs);
@@ -321,8 +322,8 @@ void prefjson::setPreferences(const QString& json)
         session->setGlobalDownloadSpeedLimit(m["dl_limit"].toInt());
     if (m.contains("up_limit"))
         session->setGlobalUploadSpeedLimit(m["up_limit"].toInt());
-    if (m.contains("enable_utp"))
-        session->setUTPEnabled(m["enable_utp"].toBool());
+    if (m.contains("bittorrent_protocol"))
+        session->setBTProtocol(static_cast<BitTorrent::BTProtocol>(m["bittorrent_protocol"].toInt()));
     if (m.contains("limit_utp_rate"))
         session->setUTPRateLimited(m["limit_utp_rate"].toBool());
     if (m.contains("limit_tcp_overhead"))
@@ -386,9 +387,9 @@ void prefjson::setPreferences(const QString& json)
         if (pref->getLocale() != locale) {
             QTranslator *translator = new QTranslator;
             if (translator->load(QString::fromUtf8(":/lang/qbittorrent_") + locale)) {
-                qDebug("%s locale recognized, using translation.", qPrintable(locale));
+                qDebug("%s locale recognized, using translation.", qUtf8Printable(locale));
             }else{
-                qDebug("%s locale unrecognized, using default (en).", qPrintable(locale));
+                qDebug("%s locale unrecognized, using default (en).", qUtf8Printable(locale));
             }
             qApp->installTranslator(translator);
 
@@ -396,6 +397,8 @@ void prefjson::setPreferences(const QString& json)
         }
     }
     // HTTP Server
+    if (m.contains("web_ui_domain_list"))
+        pref->setServerDomains(m["web_ui_domain_list"].toString());
     if (m.contains("web_ui_port"))
         pref->setWebUiPort(m["web_ui_port"].toUInt());
     if (m.contains("web_ui_upnp"))

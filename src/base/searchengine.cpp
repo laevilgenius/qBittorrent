@@ -36,6 +36,7 @@
 
 #include "base/utils/fs.h"
 #include "base/utils/misc.h"
+#include "base/logger.h"
 #include "base/preferences.h"
 #include "base/profile.h"
 #include "base/net/downloadmanager.h"
@@ -141,6 +142,8 @@ void SearchEngine::enablePlugin(const QString &name, bool enabled)
         else if (!disabledPlugins.contains(name))
             disabledPlugins.append(name);
         pref->setSearchEngDisabled(disabledPlugins);
+
+        emit pluginEnabled(name, enabled);
     }
 }
 
@@ -153,7 +156,7 @@ void SearchEngine::updatePlugin(const QString &name)
 // Install or update plugin from file or url
 void SearchEngine::installPlugin(const QString &source)
 {
-    qDebug("Asked to install plugin at %s", qPrintable(source));
+    qDebug("Asked to install plugin at %s", qUtf8Printable(source));
 
     if (Utils::Misc::isUrl(source)) {
         using namespace Net;
@@ -239,6 +242,7 @@ bool SearchEngine::uninstallPlugin(const QString &name)
     // Remove it from supported engines
     delete m_plugins.take(name);
 
+    emit pluginUninstalled(name);
     return true;
 }
 
@@ -612,7 +616,7 @@ void SearchEngine::parseVersionInfo(const QByteArray &info)
 
         dataCorrect = true;
         if (isUpdateNeeded(pluginName, version)) {
-            qDebug("Plugin: %s is outdated", qPrintable(pluginName));
+            qDebug("Plugin: %s is outdated", qUtf8Printable(pluginName));
             updateInfo[pluginName] = version;
         }
     }
@@ -659,20 +663,27 @@ PluginVersion SearchEngine::getPluginVersion(QString filePath)
 {
     QFile plugin(filePath);
     if (!plugin.exists()) {
-        qDebug("%s plugin does not exist, returning 0.0", qPrintable(filePath));
+        qDebug("%s plugin does not exist, returning 0.0", qUtf8Printable(filePath));
         return {};
     }
 
     if (!plugin.open(QIODevice::ReadOnly | QIODevice::Text))
         return {};
 
+    const PluginVersion invalidVersion;
+
     PluginVersion version;
     while (!plugin.atEnd()) {
         QByteArray line = plugin.readLine();
         if (line.startsWith("#VERSION: ")) {
             line = line.split(' ').last().trimmed();
-            version = PluginVersion::tryParse(line, {});
-            qDebug() << "plugin" << filePath << "version: " << version;
+            version = PluginVersion::tryParse(line, invalidVersion);
+            if (version == invalidVersion) {
+                LogMsg(tr("Search plugin '%1' contains invalid version string ('%2')")
+                    .arg(Utils::Fs::fileName(filePath)).arg(QString::fromUtf8(line)), Log::MsgType::WARNING);
+            }
+            else
+                qDebug() << "plugin" << filePath << "version: " << version;
             break;
         }
     }

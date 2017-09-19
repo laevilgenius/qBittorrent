@@ -82,6 +82,7 @@ public slots:
     void bottomPrioSelectedTorrents();
     void copySelectedMagnetURIs() const;
     void copySelectedNames() const;
+    void copySelectedHashes() const;
     void openSelectedTorrentsFolder() const;
     void recheckSelectedTorrents();
     void setDlLimitSelectedTorrents();
@@ -122,7 +123,6 @@ signals:
 private:
     void wheelEvent(QWheelEvent *event) override;
     void askAddTagsForSelection();
-    void askRemoveTagsForSelection();
     void confirmRemoveAllTagsForSelection();
     QStringList askTagsForSelection(const QString &dialogTitle);
     void applyToSelectedTorrents(const std::function<void (BitTorrent::TorrentHandle *const)> &fn);

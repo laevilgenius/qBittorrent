@@ -151,6 +151,47 @@ namespace BitTorrent
         uint nbErrored = 0;
     };
 
+    class SessionSettingsEnums
+    {
+        Q_GADGET
+
+    public:
+        // TODO: remove `SessionSettingsEnums` wrapper when we can use `Q_ENUM_NS` directly (QT >= 5.8 only)
+        enum class ChokingAlgorithm : int
+        {
+            FixedSlots = 0,
+            RateBased = 1
+        };
+        Q_ENUM(ChokingAlgorithm)
+
+        enum class SeedChokingAlgorithm : int
+        {
+            RoundRobin = 0,
+            FastestUpload = 1,
+            AntiLeech = 2
+        };
+        Q_ENUM(SeedChokingAlgorithm)
+
+        enum class MixedModeAlgorithm : int
+        {
+            TCP = 0,
+            Proportional = 1
+        };
+        Q_ENUM(MixedModeAlgorithm)
+
+        enum class BTProtocol : int
+        {
+            Both = 0,
+            TCP = 1,
+            UTP = 2
+        };
+        Q_ENUM(BTProtocol)
+    };
+    using ChokingAlgorithm = SessionSettingsEnums::ChokingAlgorithm;
+    using SeedChokingAlgorithm = SessionSettingsEnums::SeedChokingAlgorithm;
+    using MixedModeAlgorithm = SessionSettingsEnums::MixedModeAlgorithm;
+    using BTProtocol = SessionSettingsEnums::BTProtocol;
+
 #if LIBTORRENT_VERSION_NUM >= 10100
     struct SessionMetricIndices
     {
@@ -188,6 +229,9 @@ namespace BitTorrent
             int diskBlocksInUse = 0;
             int numBlocksRead = 0;
             int numBlocksCacheHits = 0;
+            int writeJobs = 0;
+            int readJobs = 0;
+            int hashJobs = 0;
             int queuedDiskJobs = 0;
             int diskJobTime = 0;
         } disk;
@@ -210,7 +254,7 @@ namespace BitTorrent
         void setTempPath(QString path);
         bool isTempPathEnabled() const;
         void setTempPathEnabled(bool enabled);
-        QString torrentTempPath(const InfoHash &hash) const;
+        QString torrentTempPath(const TorrentInfo &torrentInfo) const;
 
         static bool isValidCategoryName(const QString &name);
         // returns category itself and all top level categories
@@ -314,6 +358,10 @@ namespace BitTorrent
         void setForceProxyEnabled(bool enabled);
         bool isProxyPeerConnectionsEnabled() const;
         void setProxyPeerConnectionsEnabled(bool enabled);
+        ChokingAlgorithm chokingAlgorithm() const;
+        void setChokingAlgorithm(ChokingAlgorithm mode);
+        SeedChokingAlgorithm seedChokingAlgorithm() const;
+        void setSeedChokingAlgorithm(SeedChokingAlgorithm mode);
         bool isAddTrackersEnabled() const;
         void setAddTrackersEnabled(bool enabled);
         QString additionalTrackers() const;
@@ -324,22 +372,32 @@ namespace BitTorrent
         void setIPFilterFile(QString path);
         bool announceToAllTrackers() const;
         void setAnnounceToAllTrackers(bool val);
-        uint diskCacheSize() const;
-        void setDiskCacheSize(uint size);
-        uint diskCacheTTL() const;
-        void setDiskCacheTTL(uint ttl);
+        int diskCacheSize() const;
+        void setDiskCacheSize(int size);
+        int diskCacheTTL() const;
+        void setDiskCacheTTL(int ttl);
         bool useOSCache() const;
         void setUseOSCache(bool use);
+        bool isGuidedReadCacheEnabled() const;
+        void setGuidedReadCacheEnabled(bool enabled);
+        bool isSuggestModeEnabled() const;
+        void setSuggestMode(bool mode);
+        int sendBufferWatermark() const;
+        void setSendBufferWatermark(int value);
+        int sendBufferLowWatermark() const;
+        void setSendBufferLowWatermark(int value);
+        int sendBufferWatermarkFactor() const;
+        void setSendBufferWatermarkFactor(int value);
         bool isAnonymousModeEnabled() const;
         void setAnonymousModeEnabled(bool enabled);
         bool isQueueingSystemEnabled() const;
         void setQueueingSystemEnabled(bool enabled);
         bool ignoreSlowTorrentsForQueueing() const;
         void setIgnoreSlowTorrentsForQueueing(bool ignore);
-        uint outgoingPortsMin() const;
-        void setOutgoingPortsMin(uint min);
-        uint outgoingPortsMax() const;
-        void setOutgoingPortsMax(uint max);
+        int outgoingPortsMin() const;
+        void setOutgoingPortsMin(int min);
+        int outgoingPortsMax() const;
+        void setOutgoingPortsMax(int max);
         bool ignoreLimitsOnLAN() const;
         void setIgnoreLimitsOnLAN(bool ignore);
         bool includeOverheadInLimits() const;
@@ -364,10 +422,14 @@ namespace BitTorrent
         void setMaxActiveUploads(int max);
         int maxActiveTorrents() const;
         void setMaxActiveTorrents(int max);
-        bool isUTPEnabled() const;
-        void setUTPEnabled(bool enabled);
+        BTProtocol btProtocol() const;
+        void setBTProtocol(BTProtocol protocol);
         bool isUTPRateLimited() const;
         void setUTPRateLimited(bool limited);
+        MixedModeAlgorithm utpMixedMode() const;
+        void setUtpMixedMode(MixedModeAlgorithm mode);
+        bool multiConnectionsPerIpEnabled() const;
+        void setMultiConnectionsPerIpEnabled(bool enabled);
         bool isTrackerFilteringEnabled() const;
         void setTrackerFilteringEnabled(bool enabled);
         QStringList bannedIPs() const;
@@ -477,7 +539,6 @@ namespace BitTorrent
         void handleDownloadFinished(const QString &url, const QString &filePath);
         void handleDownloadFailed(const QString &url, const QString &reason);
         void handleRedirectedToMagnet(const QString &url, const QString &magnetUri);
-        void switchToAlternativeMode(bool alternative);
 
         // Session reconfiguration triggers
         void networkOnlineStateChanged(const bool online);
@@ -497,17 +558,19 @@ namespace BitTorrent
 #if LIBTORRENT_VERSION_NUM < 10100
         void configure(libtorrent::session_settings &sessionSettings);
         void adjustLimits(libtorrent::session_settings &sessionSettings);
+        void applyBandwidthLimits(libtorrent::session_settings &sessionSettings);
 #else
         void configure(libtorrent::settings_pack &settingsPack);
         void configurePeerClasses();
         void adjustLimits(libtorrent::settings_pack &settingsPack);
+        void applyBandwidthLimits(libtorrent::settings_pack &settingsPack);
         void initMetrics();
 #endif
         void adjustLimits();
+        void applyBandwidthLimits();
         void processBannedIPs(libtorrent::ip_filter &filter);
         const QStringList getListeningIPs();
         void configureListeningInterface();
-        void changeSpeedLimitMode_impl(bool alternative);
         void enableTracker(bool enable);
         void enableBandwidthScheduler();
         void populateAdditionalTrackers();
@@ -569,17 +632,22 @@ namespace BitTorrent
         CachedSettingValue<bool> m_isTrackerFilteringEnabled;
         CachedSettingValue<QString> m_IPFilterFile;
         CachedSettingValue<bool> m_announceToAllTrackers;
-        CachedSettingValue<uint> m_diskCacheSize;
-        CachedSettingValue<uint> m_diskCacheTTL;
+        CachedSettingValue<int> m_diskCacheSize;
+        CachedSettingValue<int> m_diskCacheTTL;
         CachedSettingValue<bool> m_useOSCache;
+        CachedSettingValue<bool> m_guidedReadCacheEnabled;
+        CachedSettingValue<bool> m_isSuggestMode;
+        CachedSettingValue<int> m_sendBufferWatermark;
+        CachedSettingValue<int> m_sendBufferLowWatermark;
+        CachedSettingValue<int> m_sendBufferWatermarkFactor;
         CachedSettingValue<bool> m_isAnonymousModeEnabled;
         CachedSettingValue<bool> m_isQueueingEnabled;
         CachedSettingValue<int> m_maxActiveDownloads;
         CachedSettingValue<int> m_maxActiveUploads;
         CachedSettingValue<int> m_maxActiveTorrents;
         CachedSettingValue<bool> m_ignoreSlowTorrentsForQueueing;
-        CachedSettingValue<uint> m_outgoingPortsMin;
-        CachedSettingValue<uint> m_outgoingPortsMax;
+        CachedSettingValue<int> m_outgoingPortsMin;
+        CachedSettingValue<int> m_outgoingPortsMax;
         CachedSettingValue<bool> m_ignoreLimitsOnLAN;
         CachedSettingValue<bool> m_includeOverheadInLimits;
         CachedSettingValue<QString> m_announceIP;
@@ -589,8 +657,10 @@ namespace BitTorrent
         CachedSettingValue<int> m_maxUploads;
         CachedSettingValue<int> m_maxConnectionsPerTorrent;
         CachedSettingValue<int> m_maxUploadsPerTorrent;
-        CachedSettingValue<bool> m_isUTPEnabled;
+        CachedSettingValue<BTProtocol> m_btProtocol;
         CachedSettingValue<bool> m_isUTPRateLimited;
+        CachedSettingValue<MixedModeAlgorithm> m_utpMixedMode;
+        CachedSettingValue<bool> m_multiConnectionsPerIpEnabled;
         CachedSettingValue<bool> m_isAddTrackersEnabled;
         CachedSettingValue<QString> m_additionalTrackers;
         CachedSettingValue<qreal> m_globalMaxRatio;
@@ -618,6 +688,8 @@ namespace BitTorrent
         CachedSettingValue<int> m_encryption;
         CachedSettingValue<bool> m_isForceProxyEnabled;
         CachedSettingValue<bool> m_isProxyPeerConnectionsEnabled;
+        CachedSettingValue<ChokingAlgorithm> m_chokingAlgorithm;
+        CachedSettingValue<SeedChokingAlgorithm> m_seedChokingAlgorithm;
         CachedSettingValue<QVariantMap> m_storedCategories;
         CachedSettingValue<QStringList> m_storedTags;
         CachedSettingValue<int> m_maxRatioAction;

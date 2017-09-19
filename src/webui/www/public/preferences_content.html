@@ -88,6 +88,12 @@
 </div>
 
 <div id="ConnectionTab" class="PrefTab invisible">
+<label>QBT_TR(Enabled protocol:)QBT_TR[CONTEXT=OptionsDialog]</label>
+<select id="enable_protocol_combobox">
+  <option value="0" selected>QBT_TR(TCP and μTP)QBT_TR[CONTEXT=OptionsDialog]</option>
+  <option value="1">TCP</option>
+  <option value="2">μTP</option>
+</select><br/>
 <fieldset class="settings">
   <legend>QBT_TR(Listening Port)QBT_TR[CONTEXT=OptionsDialog]</legend>
   <label for="port_value">QBT_TR(Port used for incoming connections:)QBT_TR[CONTEXT=OptionsDialog]</label>
@@ -256,8 +262,6 @@
 
 <fieldset class="settings">
   <legend>QBT_TR(Rate Limits Settings)QBT_TR[CONTEXT=OptionsDialog]</legend>
-  <input type="checkbox" id="enable_utp_checkbox" onClick="updateUTPEnabled();"/>
-  <label for="enable_utp_checkbox">QBT_TR(Enable µTP protocol)QBT_TR[CONTEXT=OptionsDialog]</label><br/>
   <input type="checkbox" id="limit_utp_rate_checkbox"/>
   <label for="limit_utp_rate_checkbox">QBT_TR(Apply rate limit to µTP protocol)QBT_TR[CONTEXT=OptionsDialog]</label><br/>
   <input type="checkbox" id="limit_tcp_overhead_checkbox"/>
@@ -309,7 +313,7 @@
   <legend>QBT_TR(Share Ratio Limiting)QBT_TR[CONTEXT=OptionsDialog]</legend>
   <table>
   <tr>
-  <td> 
+  <td>
   <input type="checkbox" id="max_ratio_checkbox" onClick="updateMaxRatioTimeEnabled();"/>
   <label for="max_ratio_checkbox">QBT_TR(Seed torrents until their ratio reaches)QBT_TR[CONTEXT=OptionsDialog]</label>
   </td>
@@ -317,7 +321,7 @@
   <input type="text" id="max_ratio_value" style="width: 4em;"/>
   </td>
   <tr>
-  <td> 
+  <td>
   <input type="checkbox" id="max_seeding_time_checkbox" onClick="updateMaxRatioTimeEnabled();"/>
   <label for="max_seeding_time_checkbox">QBT_TR(Seed torrents until their seeding time reaches)QBT_TR[CONTEXT=OptionsDialog]</label>
   </td>
@@ -406,6 +410,7 @@
 
 <fieldset class="settings">
   <legend>QBT_TR(Web User Interface (Remote control))QBT_TR[CONTEXT=OptionsDialog]</legend>
+  <label for="webui_domain_textarea">QBT_TR(Server domains:)QBT_TR[CONTEXT=OptionsDialog]</label><textarea id="webui_domain_textarea" rows="1" cols="70"></textarea><br/>
   <label for="webui_port_value">QBT_TR(Port:)QBT_TR[CONTEXT=OptionsDialog]</label><input type="text" id="webui_port_value" style="width: 4em;"/><br/>
   <input type="checkbox" id="webui_upnp_checkbox"/>
   <label for="webui_upnp_checkbox">QBT_TR(Use UPnP / NAT-PMP to forward the port from my router)QBT_TR[CONTEXT=OptionsDialog]</label><br/>
@@ -691,14 +696,6 @@ updateDlLimitEnabled = function() {
   }
 }
 
-updateUTPEnabled = function() {
-  if($('enable_utp_checkbox').getProperty('checked')) {
-    $('limit_utp_rate_checkbox').setProperty('disabled', false);
-  } else {
-    $('limit_utp_rate_checkbox').setProperty('disabled', true);
-  }
-}
-
 updateAltUpLimitEnabled = function() {
   if($('alt_up_limit_checkbox').getProperty('checked')) {
     $('alt_up_limit_value').setProperty('disabled', false);
@@ -973,10 +970,9 @@ loadPreferences = function() {
                       $('dl_limit_value').setProperty('value', dl_limit);
                     }
                     updateDlLimitEnabled();
-                    $('enable_utp_checkbox').setProperty('checked', pref.enable_utp);
+                    $('enable_protocol_combobox').setProperty('value', pref.bittorrent_protocol);
                     $('limit_utp_rate_checkbox').setProperty('checked', pref.limit_utp_rate);
                     $('limit_tcp_overhead_checkbox').setProperty('checked', pref.limit_tcp_overhead);
-                    updateUTPEnabled();
 
                     // Alternative Global Rate Limits
                     var alt_up_limit = pref.alt_up_limit.toInt() / 1024;
@@ -1049,6 +1045,7 @@ loadPreferences = function() {
                     $('locale_select').setProperty('value', pref.locale);
 
                     // HTTP Server
+                    $('webui_domain_textarea').setProperty('value', pref.web_ui_domain_list);
                     $('webui_port_value').setProperty('value', pref.web_ui_port);
                     $('webui_upnp_checkbox').setProperty('checked', pref.web_ui_upnp);
                     $('use_https_checkbox').setProperty('checked', pref.use_https);
@@ -1215,7 +1212,7 @@ applyPreferences = function() {
     }
   }
   settings.set('dl_limit', dl_limit);
-  settings.set('enable_utp', $('enable_utp_checkbox').getProperty('checked'));
+  settings.set('bittorrent_protocol', $('enable_protocol_combobox').getProperty('value'));
   settings.set('limit_utp_rate', $('limit_utp_rate_checkbox').getProperty('checked'));
   settings.set('limit_tcp_overhead', $('limit_tcp_overhead_checkbox').getProperty('checked'));
 
@@ -1316,6 +1313,7 @@ applyPreferences = function() {
   settings.set('locale', $('locale_select').getProperty('value'));
 
   // HTTP Server
+  settings.set('web_ui_domain_list', $('webui_domain_textarea').getProperty('value'));
   var web_ui_port = $('webui_port_value').getProperty('value').toInt();
   if(isNaN(web_ui_port) || web_ui_port < 1 || web_ui_port > 65535) {
     alert("QBT_TR(The port used for the Web UI must be between 1 and 65535.)QBT_TR[CONTEXT=HttpServer]");

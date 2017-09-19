@@ -118,6 +118,11 @@ transferlistwidget.cpp
 updownratiodlg.cpp
 )
 
+if (APPLE)
+    list(APPEND QBT_GUI_HEADERS macutilities.h)
+    list(APPEND QBT_GUI_SOURCES macutilities.mm)
+endif (APPLE)
+
 if (WIN32 OR APPLE)
     list(APPEND QBT_GUI_HEADERS programupdater.h)
     list(APPEND QBT_GUI_SOURCES programupdater.cpp)
@@ -153,3 +158,7 @@ target_link_libraries(qbt_gui qbt_lineedit qbt_powermanagement qbt_rss qbt_prope
 if(WIN32)
     target_link_libraries(qbt_gui Qt5::WinExtras)
 endif(WIN32)
+
+if (APPLE)
+    target_link_libraries(qbt_gui Qt5::MacExtras)
+endif()

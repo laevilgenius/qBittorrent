@@ -41,6 +41,7 @@
 #include <QString>
 #include <QThread>
 #include <QTimer>
+#include <QUuid>
 
 #include <cstdlib>
 #include <queue>
@@ -92,6 +93,14 @@
 #include "tracker.h"
 #include "trackerentry.h"
 
+#ifdef Q_OS_WIN
+#include <iphlpapi.h>
+#endif
+
+#if defined(Q_OS_WIN) && (_WIN32_WINNT < 0x0600)
+using NETIO_STATUS = LONG;
+#endif
+
 static const char PEER_ID[] = "qB";
 static const char RESUME_FOLDER[] = "BT_backup";
 static const char USER_AGENT[] = "qBittorrent/" QBT_VERSION_2;
@@ -108,6 +117,10 @@ namespace
     void torrentQueuePositionDown(const libt::torrent_handle &handle);
     void torrentQueuePositionTop(const libt::torrent_handle &handle);
     void torrentQueuePositionBottom(const libt::torrent_handle &handle);
+
+#ifdef Q_OS_WIN
+    QString convertIfaceNameToGuid(const QString &name);
+#endif
 
     inline SettingsStorage *settings() { return  SettingsStorage::instance(); }
 
@@ -224,6 +237,20 @@ namespace
 
     template <typename T>
     LowerLimited<T> lowerLimited(T limit, T ret) { return LowerLimited<T>(limit, ret); }
+
+    template <typename T>
+    std::function<T (const T&)> clampValue(const T lower, const T upper)
+    {
+        // TODO: change return type to `auto` when using C++14
+        return [lower, upper](const T value) -> T
+        {
+            if (value < lower)
+                return lower;
+            if (value > upper)
+                return upper;
+            return value;
+        };
+    }
 }
 
 // Session
@@ -247,9 +274,14 @@ Session::Session(QObject *parent)
     , m_isTrackerFilteringEnabled(BITTORRENT_SESSION_KEY("TrackerFilteringEnabled"), false)
     , m_IPFilterFile(BITTORRENT_SESSION_KEY("IPFilter"))
     , m_announceToAllTrackers(BITTORRENT_SESSION_KEY("AnnounceToAllTrackers"), true)
-    , m_diskCacheSize(BITTORRENT_SESSION_KEY("DiskCacheSize"), 0)
+    , m_diskCacheSize(BITTORRENT_SESSION_KEY("DiskCacheSize"), 64)
     , m_diskCacheTTL(BITTORRENT_SESSION_KEY("DiskCacheTTL"), 60)
     , m_useOSCache(BITTORRENT_SESSION_KEY("UseOSCache"), true)
+    , m_guidedReadCacheEnabled(BITTORRENT_SESSION_KEY("GuidedReadCache"), true)
+    , m_isSuggestMode(BITTORRENT_SESSION_KEY("SuggestMode"), false)
+    , m_sendBufferWatermark(BITTORRENT_SESSION_KEY("SendBufferWatermark"), 500)
+    , m_sendBufferLowWatermark(BITTORRENT_SESSION_KEY("SendBufferLowWatermark"), 10)
+    , m_sendBufferWatermarkFactor(BITTORRENT_SESSION_KEY("SendBufferWatermarkFactor"), 50)
     , m_isAnonymousModeEnabled(BITTORRENT_SESSION_KEY("AnonymousModeEnabled"), false)
     , m_isQueueingEnabled(BITTORRENT_SESSION_KEY("QueueingSystemEnabled"), true)
     , m_maxActiveDownloads(BITTORRENT_SESSION_KEY("MaxActiveDownloads"), 3, lowerLimited(-1))
@@ -267,8 +299,12 @@ Session::Session(QObject *parent)
     , m_maxUploads(BITTORRENT_SESSION_KEY("MaxUploads"), -1, lowerLimited(0, -1))
     , m_maxConnectionsPerTorrent(BITTORRENT_SESSION_KEY("MaxConnectionsPerTorrent"), 100, lowerLimited(0, -1))
     , m_maxUploadsPerTorrent(BITTORRENT_SESSION_KEY("MaxUploadsPerTorrent"), -1, lowerLimited(0, -1))
-    , m_isUTPEnabled(BITTORRENT_SESSION_KEY("uTPEnabled"), true)
+    , m_btProtocol(BITTORRENT_SESSION_KEY("BTProtocol"), BTProtocol::Both
+        , clampValue(BTProtocol::Both, BTProtocol::UTP))
     , m_isUTPRateLimited(BITTORRENT_SESSION_KEY("uTPRateLimited"), true)
+    , m_utpMixedMode(BITTORRENT_SESSION_KEY("uTPMixedMode"), MixedModeAlgorithm::Proportional
+        , clampValue(MixedModeAlgorithm::TCP, MixedModeAlgorithm::Proportional))
+    , m_multiConnectionsPerIpEnabled(BITTORRENT_SESSION_KEY("MultiConnectionsPerIp"), false)
     , m_isAddTrackersEnabled(BITTORRENT_SESSION_KEY("AddTrackersEnabled"), false)
     , m_additionalTrackers(BITTORRENT_SESSION_KEY("AdditionalTrackers"))
     , m_globalMaxRatio(BITTORRENT_SESSION_KEY("GlobalMaxRatio"), -1, [](qreal r) { return r < 0 ? -1. : r;})
@@ -296,6 +332,10 @@ Session::Session(QObject *parent)
     , m_encryption(BITTORRENT_SESSION_KEY("Encryption"), 0)
     , m_isForceProxyEnabled(BITTORRENT_SESSION_KEY("ForceProxy"), true)
     , m_isProxyPeerConnectionsEnabled(BITTORRENT_SESSION_KEY("ProxyPeerConnections"), false)
+    , m_chokingAlgorithm(BITTORRENT_SESSION_KEY("ChokingAlgorithm"), ChokingAlgorithm::FixedSlots
+        , clampValue(ChokingAlgorithm::FixedSlots, ChokingAlgorithm::RateBased))
+    , m_seedChokingAlgorithm(BITTORRENT_SESSION_KEY("SeedChokingAlgorithm"), SeedChokingAlgorithm::FastestUpload
+        , clampValue(SeedChokingAlgorithm::RoundRobin, SeedChokingAlgorithm::AntiLeech))
     , m_storedCategories(BITTORRENT_SESSION_KEY("Categories"))
     , m_storedTags(BITTORRENT_SESSION_KEY("Tags"))
     , m_maxRatioAction(BITTORRENT_SESSION_KEY("MaxRatioAction"), Pause)
@@ -364,7 +404,10 @@ Session::Session(QObject *parent)
     sessionSettings.auto_scrape_min_interval = 900; // 15 minutes
     sessionSettings.connection_speed = 20; // default is 10
     sessionSettings.no_connect_privileged_ports = false;
-    sessionSettings.seed_choking_algorithm = libt::session_settings::fastest_upload;
+    // Disk cache pool is rarely tested in libtorrent and doesn't free buffers
+    // Soon to be deprecated there
+    // More info: https://github.com/arvidn/libtorrent/issues/2251
+    sessionSettings.use_disk_cache_pool = false;
     configure(sessionSettings);
     m_nativeSession->set_settings(sessionSettings);
     configureListeningInterface();
@@ -391,7 +434,10 @@ Session::Session(QObject *parent)
     pack.set_int(libt::settings_pack::auto_scrape_min_interval, 900); // 15 minutes
     pack.set_int(libt::settings_pack::connection_speed, 20); // default is 10
     pack.set_bool(libt::settings_pack::no_connect_privileged_ports, false);
-    pack.set_int(libt::settings_pack::seed_choking_algorithm, libt::settings_pack::fastest_upload);
+    // Disk cache pool is rarely tested in libtorrent and doesn't free buffers
+    // Soon to be deprecated there
+    // More info: https://github.com/arvidn/libtorrent/issues/2251
+    pack.set_bool(libt::settings_pack::use_disk_cache_pool, false);
     configure(pack);
 
     m_nativeSession = new libt::session(pack, 0);
@@ -419,6 +465,9 @@ Session::Session(QObject *parent)
     logger->addMessage(tr("Encryption support [%1]")
                        .arg(encryption() == 0 ? tr("ON") : encryption() == 1 ? tr("FORCED") : tr("OFF"))
                        , Log::INFO);
+
+    if (isBandwidthSchedulerEnabled())
+        enableBandwidthScheduler();
 
     if (isIPFilteringEnabled()) {
         // Manually banned IPs are handled in that function too(in the slots)
@@ -613,11 +662,14 @@ QString Session::tempPath() const
     return Utils::Fs::fromNativePath(m_tempPath);
 }
 
-QString Session::torrentTempPath(const InfoHash &hash) const
+QString Session::torrentTempPath(const TorrentInfo &torrentInfo) const
 {
-    return tempPath()
-            + static_cast<QString>(hash).left(7)
+    if ((torrentInfo.filesCount() > 1) && !torrentInfo.hasRootFolder())
+        return tempPath()
+            + QString::fromStdString(torrentInfo.nativeInfo()->orig_files().name())
             + "/";
+
+    return tempPath();
 }
 
 bool Session::isValidCategoryName(const QString &name)
@@ -929,13 +981,8 @@ Session::~Session()
 
 void Session::initInstance()
 {
-    if (!m_instance) {
+    if (!m_instance)
         m_instance = new Session;
-
-        // BandwidthScheduler::start() depends on Session being fully constructed
-        if (m_instance->isBandwidthSchedulerEnabled())
-            m_instance->enableBandwidthScheduler();
-    }
 }
 
 void Session::freeInstance()
@@ -964,6 +1011,19 @@ void Session::adjustLimits()
         m_nativeSession->apply_settings(settingsPack);
 #endif
     }
+}
+
+void Session::applyBandwidthLimits()
+{
+#if LIBTORRENT_VERSION_NUM < 10100
+        libt::session_settings sessionSettings(m_nativeSession->settings());
+        applyBandwidthLimits(sessionSettings);
+        m_nativeSession->set_settings(sessionSettings);
+#else
+        libt::settings_pack settingsPack = m_nativeSession->get_settings();
+        applyBandwidthLimits(settingsPack);
+        m_nativeSession->apply_settings(settingsPack);
+#endif
 }
 
 // Set BitTorrent session configuration
@@ -1016,6 +1076,13 @@ void Session::adjustLimits(libt::settings_pack &settingsPack)
                          , maxDownloads > -1 ? maxDownloads + m_extraLimit : maxDownloads);
     settingsPack.set_int(libt::settings_pack::active_limit
                          , maxActive > -1 ? maxActive + m_extraLimit : maxActive);
+}
+
+void Session::applyBandwidthLimits(libtorrent::settings_pack &settingsPack)
+{
+    const bool altSpeedLimitEnabled = isAltGlobalSpeedLimitEnabled();
+    settingsPack.set_int(libt::settings_pack::download_rate_limit, altSpeedLimitEnabled ? altGlobalDownloadSpeedLimit() : globalDownloadSpeedLimit());
+    settingsPack.set_int(libt::settings_pack::upload_rate_limit, altSpeedLimitEnabled ? altGlobalUploadSpeedLimit() : globalUploadSpeedLimit());
 }
 
 void Session::initMetrics()
@@ -1080,6 +1147,15 @@ void Session::initMetrics()
     m_metricIndices.disk.numBlocksCacheHits = libt::find_metric_idx("disk.num_blocks_cache_hits");
     Q_ASSERT(m_metricIndices.disk.numBlocksCacheHits >= 0);
 
+    m_metricIndices.disk.writeJobs = libt::find_metric_idx("disk.num_write_ops");
+    Q_ASSERT(m_metricIndices.disk.writeJobs >= 0);
+
+    m_metricIndices.disk.readJobs = libt::find_metric_idx("disk.num_read_ops");
+    Q_ASSERT(m_metricIndices.disk.readJobs >= 0);
+
+    m_metricIndices.disk.hashJobs = libt::find_metric_idx("disk.num_blocks_hashed");
+    Q_ASSERT(m_metricIndices.disk.hashJobs >= 0);
+
     m_metricIndices.disk.queuedDiskJobs = libt::find_metric_idx("disk.queued_disk_jobs");
     Q_ASSERT(m_metricIndices.disk.queuedDiskJobs >= 0);
 
@@ -1090,6 +1166,10 @@ void Session::initMetrics()
 void Session::configure(libtorrent::settings_pack &settingsPack)
 {
     Logger* const logger = Logger::instance();
+
+#ifdef Q_OS_WIN
+    QString chosenIP;
+#endif
 
     if (m_listenInterfaceChanged) {
         const ushort port = this->port();
@@ -1120,16 +1200,35 @@ void Session::configure(libtorrent::settings_pack &settingsPack)
                                    .arg(ip).arg(port)
                                    , Log::INFO);
                 settingsPack.set_str(libt::settings_pack::listen_interfaces, interfacesStr);
+#ifdef Q_OS_WIN
+                chosenIP = ip;
+#endif
                 break;
             }
         }
 
+#ifdef Q_OS_WIN
+        // On Vista+ versions and after Qt 5.5 QNetworkInterface::name() returns
+        // the interface's Luid and not the GUID.
+        // Libtorrent expects GUIDs for the 'outgoing_interfaces' setting.
+        if (!networkInterface().isEmpty()) {
+            QString guid = convertIfaceNameToGuid(networkInterface());
+            if (!guid.isEmpty()) {
+                settingsPack.set_str(libt::settings_pack::outgoing_interfaces, guid.toStdString());
+            }
+            else {
+                settingsPack.set_str(libt::settings_pack::outgoing_interfaces, chosenIP.toStdString());
+                LogMsg(tr("Could not get GUID of configured network interface. Binding to IP %1").arg(chosenIP)
+                       , Log::WARNING);
+            }
+        }
+#else
+        settingsPack.set_str(libt::settings_pack::outgoing_interfaces, networkInterface().toStdString());
+#endif
         m_listenInterfaceChanged = false;
     }
 
-    const bool altSpeedLimitEnabled = isAltGlobalSpeedLimitEnabled();
-    settingsPack.set_int(libt::settings_pack::download_rate_limit, altSpeedLimitEnabled ? altGlobalDownloadSpeedLimit() : globalDownloadSpeedLimit());
-    settingsPack.set_int(libt::settings_pack::upload_rate_limit, altSpeedLimitEnabled ? altGlobalUploadSpeedLimit() : globalUploadSpeedLimit());
+    applyBandwidthLimits(settingsPack);
 
     // The most secure, rc4 only so that all streams are encrypted
     settingsPack.set_int(libt::settings_pack::allowed_enc_level, libt::settings_pack::pe_rc4);
@@ -1189,8 +1288,8 @@ void Session::configure(libtorrent::settings_pack &settingsPack)
     settingsPack.set_bool(libt::settings_pack::announce_to_all_trackers, announceToAll);
     settingsPack.set_bool(libt::settings_pack::announce_to_all_tiers, announceToAll);
 
-    const int cacheSize = diskCacheSize();
-    settingsPack.set_int(libt::settings_pack::cache_size, (cacheSize > 0) ? cacheSize * 64 : -1);
+    const int cacheSize = (diskCacheSize() > -1) ? diskCacheSize() * 64 : -1;
+    settingsPack.set_int(libt::settings_pack::cache_size, cacheSize);
     settingsPack.set_int(libt::settings_pack::cache_expiry, diskCacheTTL());
     qDebug() << "Using a disk cache size of" << cacheSize << "MiB";
 
@@ -1198,6 +1297,13 @@ void Session::configure(libtorrent::settings_pack &settingsPack)
                                                               : libt::settings_pack::disable_os_cache;
     settingsPack.set_int(libt::settings_pack::disk_io_read_mode, mode);
     settingsPack.set_int(libt::settings_pack::disk_io_write_mode, mode);
+    settingsPack.set_bool(libt::settings_pack::guided_read_cache, isGuidedReadCacheEnabled());
+    settingsPack.set_int(libt::settings_pack::suggest_mode, isSuggestModeEnabled()
+                         ? libt::settings_pack::suggest_read_cache : libt::settings_pack::no_piece_suggestions);
+
+    settingsPack.set_int(libt::settings_pack::send_buffer_watermark, sendBufferWatermark() * 1024);
+    settingsPack.set_int(libt::settings_pack::send_buffer_low_watermark, sendBufferLowWatermark() * 1024);
+    settingsPack.set_int(libt::settings_pack::send_buffer_watermark_factor, sendBufferWatermarkFactor());
 
     settingsPack.set_bool(libt::settings_pack::anonymous_mode, isAnonymousModeEnabled());
 
@@ -1237,11 +1343,41 @@ void Session::configure(libtorrent::settings_pack &settingsPack)
     // * Global max upload slots
     settingsPack.set_int(libt::settings_pack::unchoke_slots_limit, maxUploads());
     // uTP
-    settingsPack.set_bool(libt::settings_pack::enable_incoming_utp, isUTPEnabled());
-    settingsPack.set_bool(libt::settings_pack::enable_outgoing_utp, isUTPEnabled());
-    settingsPack.set_int(libt::settings_pack::mixed_mode_algorithm, isUTPRateLimited()
-                         ? libt::settings_pack::prefer_tcp
-                         : libt::settings_pack::peer_proportional);
+    switch (btProtocol()) {
+    case BTProtocol::Both:
+    default:
+        settingsPack.set_bool(libt::settings_pack::enable_incoming_tcp, true);
+        settingsPack.set_bool(libt::settings_pack::enable_outgoing_tcp, true);
+        settingsPack.set_bool(libt::settings_pack::enable_incoming_utp, true);
+        settingsPack.set_bool(libt::settings_pack::enable_outgoing_utp, true);
+        break;
+
+    case BTProtocol::TCP:
+        settingsPack.set_bool(libt::settings_pack::enable_incoming_tcp, true);
+        settingsPack.set_bool(libt::settings_pack::enable_outgoing_tcp, true);
+        settingsPack.set_bool(libt::settings_pack::enable_incoming_utp, false);
+        settingsPack.set_bool(libt::settings_pack::enable_outgoing_utp, false);
+        break;
+
+    case BTProtocol::UTP:
+        settingsPack.set_bool(libt::settings_pack::enable_incoming_tcp, false);
+        settingsPack.set_bool(libt::settings_pack::enable_outgoing_tcp, false);
+        settingsPack.set_bool(libt::settings_pack::enable_incoming_utp, true);
+        settingsPack.set_bool(libt::settings_pack::enable_outgoing_utp, true);
+        break;
+    }
+
+    switch (utpMixedMode()) {
+    case MixedModeAlgorithm::TCP:
+    default:
+        settingsPack.set_int(libt::settings_pack::mixed_mode_algorithm, libt::settings_pack::prefer_tcp);
+        break;
+    case MixedModeAlgorithm::Proportional:
+        settingsPack.set_int(libt::settings_pack::mixed_mode_algorithm, libt::settings_pack::peer_proportional);
+        break;
+    }
+
+    settingsPack.set_bool(libt::settings_pack::allow_multiple_connections_per_ip, multiConnectionsPerIpEnabled());
 
     settingsPack.set_bool(libt::settings_pack::apply_ip_filter_to_trackers, isTrackerFilteringEnabled());
 
@@ -1249,6 +1385,29 @@ void Session::configure(libtorrent::settings_pack &settingsPack)
     if (isDHTEnabled())
         settingsPack.set_str(libt::settings_pack::dht_bootstrap_nodes, "dht.libtorrent.org:25401,router.bittorrent.com:6881,router.utorrent.com:6881,dht.transmissionbt.com:6881,dht.aelitis.com:6881");
     settingsPack.set_bool(libt::settings_pack::enable_lsd, isLSDEnabled());
+
+    switch (chokingAlgorithm()) {
+    case ChokingAlgorithm::FixedSlots:
+    default:
+        settingsPack.set_int(libt::settings_pack::choking_algorithm, libt::settings_pack::fixed_slots_choker);
+        break;
+    case ChokingAlgorithm::RateBased:
+        settingsPack.set_int(libt::settings_pack::choking_algorithm, libt::settings_pack::rate_based_choker);
+        break;
+    }
+
+    switch (seedChokingAlgorithm()) {
+    case SeedChokingAlgorithm::RoundRobin:
+        settingsPack.set_int(libt::settings_pack::seed_choking_algorithm, libt::settings_pack::round_robin);
+        break;
+    case SeedChokingAlgorithm::FastestUpload:
+    default:
+        settingsPack.set_int(libt::settings_pack::seed_choking_algorithm, libt::settings_pack::fastest_upload);
+        break;
+    case SeedChokingAlgorithm::AntiLeech:
+        settingsPack.set_int(libt::settings_pack::seed_choking_algorithm, libt::settings_pack::anti_leech);
+        break;
+    }
 }
 
 void Session::configurePeerClasses()
@@ -1258,9 +1417,15 @@ void Session::configurePeerClasses()
                , libt::address_v4::from_string("255.255.255.255")
                , 1 << libt::session::global_peer_class_id);
 #if TORRENT_USE_IPV6
-    f.add_rule(libt::address_v6::from_string("::0")
-               , libt::address_v6::from_string("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")
-               , 1 << libt::session::global_peer_class_id);
+    // IPv6 may not be available on OS and the parsing
+    // would result in an exception -> abnormal program termination
+    // Affects Windows XP
+    try {
+        f.add_rule(libt::address_v6::from_string("::0")
+                   , libt::address_v6::from_string("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")
+                   , 1 << libt::session::global_peer_class_id);
+    }
+    catch (std::exception &) {}
 #endif
     if (ignoreLimitsOnLAN()) {
         // local networks
@@ -1282,18 +1447,24 @@ void Session::configurePeerClasses()
                    , libt::address_v4::from_string("127.255.255.255")
                    , 1 << libt::session::local_peer_class_id);
 #if TORRENT_USE_IPV6
-        // link local
-        f.add_rule(libt::address_v6::from_string("fe80::")
-                   , libt::address_v6::from_string("febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff")
-                   , 1 << libt::session::local_peer_class_id);
-        // unique local addresses
-        f.add_rule(libt::address_v6::from_string("fc00::")
-                   , libt::address_v6::from_string("fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")
-                   , 1 << libt::session::local_peer_class_id);
-        // loopback
-        f.add_rule(libt::address_v6::from_string("::1")
-                   , libt::address_v6::from_string("::1")
-                   , 1 << libt::session::local_peer_class_id);
+        // IPv6 may not be available on OS and the parsing
+        // would result in an exception -> abnormal program termination
+        // Affects Windows XP
+        try {
+            // link local
+            f.add_rule(libt::address_v6::from_string("fe80::")
+                       , libt::address_v6::from_string("febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff")
+                       , 1 << libt::session::local_peer_class_id);
+            // unique local addresses
+            f.add_rule(libt::address_v6::from_string("fc00::")
+                       , libt::address_v6::from_string("fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")
+                       , 1 << libt::session::local_peer_class_id);
+            // loopback
+            f.add_rule(libt::address_v6::from_string("::1")
+                       , libt::address_v6::from_string("::1")
+                       , 1 << libt::session::local_peer_class_id);
+        }
+        catch (std::exception &) {}
 #endif
     }
     m_nativeSession->set_peer_class_filter(f);
@@ -1327,11 +1498,16 @@ void Session::adjustLimits(libt::session_settings &sessionSettings)
     sessionSettings.active_limit = maxActive > -1 ? maxActive + m_extraLimit : maxActive;
 }
 
-void Session::configure(libtorrent::session_settings &sessionSettings)
+void Session::applyBandwidthLimits(libt::session_settings &sessionSettings)
 {
     const bool altSpeedLimitEnabled = isAltGlobalSpeedLimitEnabled();
     sessionSettings.download_rate_limit = altSpeedLimitEnabled ? altGlobalDownloadSpeedLimit() : globalDownloadSpeedLimit();
     sessionSettings.upload_rate_limit = altSpeedLimitEnabled ? altGlobalUploadSpeedLimit() : globalUploadSpeedLimit();
+}
+
+void Session::configure(libtorrent::session_settings &sessionSettings)
+{
+    applyBandwidthLimits(sessionSettings);
 
     // The most secure, rc4 only so that all streams are encrypted
     libt::pe_settings encryptionSettings;
@@ -1394,14 +1570,21 @@ void Session::configure(libtorrent::session_settings &sessionSettings)
     bool announceToAll = announceToAllTrackers();
     sessionSettings.announce_to_all_trackers = announceToAll;
     sessionSettings.announce_to_all_tiers = announceToAll;
-    int cacheSize = diskCacheSize();
-    sessionSettings.cache_size = (cacheSize > 0) ? cacheSize * 64 : -1;
+    const int cacheSize = (diskCacheSize() > -1) ? diskCacheSize() * 64 : -1;
+    sessionSettings.cache_size = cacheSize;
     sessionSettings.cache_expiry = diskCacheTTL();
     qDebug() << "Using a disk cache size of" << cacheSize << "MiB";
     libt::session_settings::io_buffer_mode_t mode = useOSCache() ? libt::session_settings::enable_os_cache
                                                                  : libt::session_settings::disable_os_cache;
     sessionSettings.disk_io_read_mode = mode;
     sessionSettings.disk_io_write_mode = mode;
+    sessionSettings.guided_read_cache = isGuidedReadCacheEnabled();
+    sessionSettings.suggest_mode = isSuggestModeEnabled()
+            ? libt::session_settings::suggest_read_cache : libt::session_settings::no_piece_suggestions;
+
+    sessionSettings.send_buffer_watermark = sendBufferWatermark() * 1024;
+    sessionSettings.send_buffer_low_watermark = sendBufferLowWatermark() * 1024;
+    sessionSettings.send_buffer_watermark_factor = sendBufferWatermarkFactor();
 
     sessionSettings.anonymous_mode = isAnonymousModeEnabled();
 
@@ -1444,13 +1627,43 @@ void Session::configure(libtorrent::session_settings &sessionSettings)
     // * Global max upload slots
     sessionSettings.unchoke_slots_limit = maxUploads();
     // uTP
-    sessionSettings.enable_incoming_utp = isUTPEnabled();
-    sessionSettings.enable_outgoing_utp = isUTPEnabled();
+    switch (btProtocol()) {
+    case BTProtocol::Both:
+    default:
+        sessionSettings.enable_incoming_tcp = true;
+        sessionSettings.enable_outgoing_tcp = true;
+        sessionSettings.enable_incoming_utp = true;
+        sessionSettings.enable_outgoing_utp = true;
+        break;
+
+    case BTProtocol::TCP:
+        sessionSettings.enable_incoming_tcp = true;
+        sessionSettings.enable_outgoing_tcp = true;
+        sessionSettings.enable_incoming_utp = false;
+        sessionSettings.enable_outgoing_utp = false;
+        break;
+
+    case BTProtocol::UTP:
+        sessionSettings.enable_incoming_tcp = false;
+        sessionSettings.enable_outgoing_tcp = false;
+        sessionSettings.enable_incoming_utp = true;
+        sessionSettings.enable_outgoing_utp = true;
+        break;
+    }
+
     // uTP rate limiting
     sessionSettings.rate_limit_utp = isUTPRateLimited();
-    sessionSettings.mixed_mode_algorithm = isUTPRateLimited()
-                                           ? libt::session_settings::prefer_tcp
-                                           : libt::session_settings::peer_proportional;
+    switch (utpMixedMode()) {
+    case MixedModeAlgorithm::TCP:
+    default:
+        sessionSettings.mixed_mode_algorithm = libt::session_settings::prefer_tcp;
+        break;
+    case MixedModeAlgorithm::Proportional:
+        sessionSettings.mixed_mode_algorithm = libt::session_settings::peer_proportional;
+        break;
+    }
+
+    sessionSettings.allow_multiple_connections_per_ip = multiConnectionsPerIpEnabled();
 
     sessionSettings.apply_ip_filter_to_trackers = isTrackerFilteringEnabled();
 
@@ -1471,6 +1684,29 @@ void Session::configure(libtorrent::session_settings &sessionSettings)
         m_nativeSession->start_lsd();
     else
         m_nativeSession->stop_lsd();
+
+    switch (chokingAlgorithm()) {
+    case ChokingAlgorithm::FixedSlots:
+    default:
+        sessionSettings.choking_algorithm = libt::session_settings::fixed_slots_choker;
+        break;
+    case ChokingAlgorithm::RateBased:
+        sessionSettings.choking_algorithm = libt::session_settings::rate_based_choker;
+        break;
+    }
+
+    switch (seedChokingAlgorithm()) {
+    case SeedChokingAlgorithm::RoundRobin:
+        sessionSettings.seed_choking_algorithm = libt::session_settings::round_robin;
+        break;
+    case SeedChokingAlgorithm::FastestUpload:
+    default:
+        sessionSettings.seed_choking_algorithm = libt::session_settings::fastest_upload;
+        break;
+    case SeedChokingAlgorithm::AntiLeech:
+        sessionSettings.seed_choking_algorithm = libt::session_settings::anti_leech;
+        break;
+    }
 }
 #endif
 
@@ -1498,7 +1734,8 @@ void Session::enableBandwidthScheduler()
 {
     if (!m_bwScheduler) {
         m_bwScheduler = new BandwidthScheduler(this);
-        connect(m_bwScheduler.data(), SIGNAL(switchToAlternativeMode(bool)), this, SLOT(switchToAlternativeMode(bool)));
+        connect(m_bwScheduler.data(), &BandwidthScheduler::bandwidthLimitRequested
+                , this, &Session::setAltGlobalSpeedLimitEnabled);
     }
     m_bwScheduler->start();
 }
@@ -1532,8 +1769,8 @@ void Session::processShareLimits()
                     if ((ratio <= TorrentHandle::MAX_RATIO) && (ratio >= ratioLimit)) {
                         Logger* const logger = Logger::instance();
                         if (m_maxRatioAction == Remove) {
-                            deleteTorrent(torrent->hash());
                             logger->addMessage(tr("'%1' reached the maximum ratio you set. Removed.").arg(torrent->name()));
+                            deleteTorrent(torrent->hash());
                         }
                         else if (!torrent->isPaused()) {
                             torrent->pause();
@@ -1556,8 +1793,8 @@ void Session::processShareLimits()
                     if ((seedingTimeInMinutes <= TorrentHandle::MAX_SEEDING_TIME) && (seedingTimeInMinutes >= seedingTimeLimit)) {
                         Logger* const logger = Logger::instance();
                         if (m_maxRatioAction == Remove) {
-                            deleteTorrent(torrent->hash());
                             logger->addMessage(tr("'%1' reached the maximum seeding time you set. Removed.").arg(torrent->name()));
+                            deleteTorrent(torrent->hash());
                         }
                         else if (!torrent->isPaused()) {
                             torrent->pause();
@@ -1578,11 +1815,6 @@ void Session::handleDownloadFailed(const QString &url, const QString &reason)
 void Session::handleRedirectedToMagnet(const QString &url, const QString &magnetUri)
 {
     addTorrent_impl(m_downloadedTorrents.take(url), MagnetUri(magnetUri));
-}
-
-void Session::switchToAlternativeMode(bool alternative)
-{
-    changeSpeedLimitMode_impl(alternative);
 }
 
 // Add to BitTorrent session the downloaded torrent file
@@ -1642,19 +1874,18 @@ bool Session::deleteTorrent(const QString &hash, bool deleteLocalFiles)
     TorrentHandle *const torrent = m_torrents.take(hash);
     if (!torrent) return false;
 
-    qDebug("Deleting torrent with hash: %s", qPrintable(torrent->hash()));
+    qDebug("Deleting torrent with hash: %s", qUtf8Printable(torrent->hash()));
     emit torrentAboutToBeRemoved(torrent);
 
     // Remove it from session
     if (deleteLocalFiles) {
-        if (torrent->savePath(true) == torrentTempPath(torrent->hash())) {
+        QString rootPath = torrent->rootPath(true);
+        if (!rootPath.isEmpty())
+            // torrent with root folder
+            m_savePathsToRemove[torrent->hash()] = rootPath;
+        else if (torrent->useTempPath())
+            // torrent without root folder still has it in its temporary save path
             m_savePathsToRemove[torrent->hash()] = torrent->savePath(true);
-        }
-        else {
-            QString rootPath = torrent->rootPath(true);
-            if (!rootPath.isEmpty())
-                m_savePathsToRemove[torrent->hash()] = rootPath;
-        }
         m_nativeSession->remove_torrent(torrent->nativeHandle(), libt::session::delete_files);
     }
     else {
@@ -1668,10 +1899,10 @@ bool Session::deleteTorrent(const QString &hash, bool deleteLocalFiles)
 #endif
         // Remove unwanted and incomplete files
         foreach (const QString &unwantedFile, unwantedFiles) {
-            qDebug("Removing unwanted file: %s", qPrintable(unwantedFile));
+            qDebug("Removing unwanted file: %s", qUtf8Printable(unwantedFile));
             Utils::Fs::forceRemove(unwantedFile);
             const QString parentFolder = Utils::Fs::branchPath(unwantedFile);
-            qDebug("Attempt to remove parent folder (if empty): %s", qPrintable(parentFolder));
+            qDebug("Attempt to remove parent folder (if empty): %s", qUtf8Printable(parentFolder));
             QDir().rmpath(parentFolder);
         }
     }
@@ -1852,9 +2083,7 @@ bool Session::addTorrent(const TorrentInfo &torrentInfo, const AddTorrentParams 
 bool Session::addTorrent_impl(AddTorrentData addData, const MagnetUri &magnetUri,
                               TorrentInfo torrentInfo, const QByteArray &fastresumeData)
 {
-    addData.savePath = normalizeSavePath(
-                addData.savePath,
-                ((!addData.resumed && isAutoTMMDisabledByDefault()) ? defaultSavePath() : ""));
+    addData.savePath = normalizeSavePath(addData.savePath, "");
 
     if (!addData.category.isEmpty()) {
         if (!m_categories.contains(addData.category) && !addCategory(addData.category)) {
@@ -1941,7 +2170,7 @@ bool Session::addTorrent_impl(AddTorrentData addData, const MagnetUri &magnetUri
     }
 
     qDebug("Adding torrent...");
-    qDebug(" -> Hash: %s", qPrintable(hash));
+    qDebug(" -> Hash: %s", qUtf8Printable(hash));
 
     // Preallocation mode
     if (isPreallocationEnabled())
@@ -1987,7 +2216,7 @@ bool Session::findIncompleteFiles(TorrentInfo &torrentInfo, QString &savePath) c
                 torrentInfo.renameFile(i, filePath + QB_EXT);
             }
             if ((i % 100) == 0)
-                qApp->processEvents();
+                qApp->processEvents(QEventLoop::ExcludeUserInputEvents);
         }
 
         return found;
@@ -1995,7 +2224,7 @@ bool Session::findIncompleteFiles(TorrentInfo &torrentInfo, QString &savePath) c
 
     bool found = findInDir(savePath, torrentInfo);
     if (!found && isTempPathEnabled()) {
-        savePath = torrentTempPath(torrentInfo.hash());
+        savePath = torrentTempPath(torrentInfo);
         found = findInDir(savePath, torrentInfo);
     }
 
@@ -2018,8 +2247,8 @@ bool Session::loadMetadata(const MagnetUri &magnetUri)
     if (m_loadedMetadata.contains(hash)) return false;
 
     qDebug("Adding torrent to preload metadata...");
-    qDebug(" -> Hash: %s", qPrintable(hash));
-    qDebug(" -> Name: %s", qPrintable(name));
+    qDebug(" -> Hash: %s", qUtf8Printable(hash));
+    qDebug(" -> Name: %s", qUtf8Printable(name));
 
     libt::add_torrent_params p = magnetUri.addTorrentParams();
 
@@ -2080,18 +2309,6 @@ void Session::exportTorrentFile(TorrentHandle *const torrent, TorrentExportFolde
     }
 }
 
-void Session::changeSpeedLimitMode_impl(bool alternative)
-{
-    qDebug() << Q_FUNC_INFO << alternative;
-    if (alternative == isAltGlobalSpeedLimitEnabled()) return;
-
-    // Save new state to remember it on startup
-    m_isAltGlobalSpeedLimitEnabled = alternative;
-    configureDeferred();
-    // Notify
-    emit speedLimitModeChanged(alternative);
-}
-
 void Session::generateResumeData(bool final)
 {
     foreach (TorrentHandle *const torrent, m_torrents) {
@@ -2101,7 +2318,7 @@ void Session::generateResumeData(bool final)
         if (!final && !torrent->needSaveResumeData()) continue;
 
         saveTorrentResumeData(torrent, final);
-        qDebug("Saving fastresume data for %s", qPrintable(torrent->name()));
+        qDebug("Saving fastresume data for %s", qUtf8Printable(torrent->name()));
     }
 }
 
@@ -2224,7 +2441,7 @@ const QStringList Session::getListeningIPs()
     // Attempt to listen on provided interface
     const QNetworkInterface networkIFace = QNetworkInterface::interfaceFromName(ifaceName);
     if (!networkIFace.isValid()) {
-        qDebug("Invalid network interface: %s", qPrintable(ifaceName));
+        qDebug("Invalid network interface: %s", qUtf8Printable(ifaceName));
         logger->addMessage(tr("The network interface defined is invalid: %1").arg(ifaceName), Log::CRITICAL);
         IPs.append("127.0.0.1"); // Force listening to localhost and avoid accidental connection that will expose user data.
         return IPs;
@@ -2421,11 +2638,13 @@ bool Session::isAltGlobalSpeedLimitEnabled() const
 
 void Session::setAltGlobalSpeedLimitEnabled(bool enabled)
 {
-    // Stop the scheduler when the user has manually changed the bandwidth mode
-    if (isBandwidthSchedulerEnabled())
-        setBandwidthSchedulerEnabled(false);
+    if (enabled == isAltGlobalSpeedLimitEnabled()) return;
 
-    changeSpeedLimitMode_impl(enabled);
+    // Save new state to remember it on startup
+    m_isAltGlobalSpeedLimitEnabled = enabled;
+    applyBandwidthLimits();
+    // Notify
+    emit speedLimitModeChanged(m_isAltGlobalSpeedLimitEnabled);
 }
 
 bool Session::isBandwidthSchedulerEnabled() const
@@ -2488,10 +2707,10 @@ QString Session::networkInterface() const
     return m_networkInterface;
 }
 
-void Session::setNetworkInterface(const QString &interface)
+void Session::setNetworkInterface(const QString &iface)
 {
-    if (interface != networkInterface()) {
-        m_networkInterface = interface;
+    if (iface != networkInterface()) {
+        m_networkInterface = iface;
         configureListeningInterface();
     }
 }
@@ -2573,6 +2792,32 @@ void Session::setProxyPeerConnectionsEnabled(bool enabled)
         m_isProxyPeerConnectionsEnabled = enabled;
         configureDeferred();
     }
+}
+
+ChokingAlgorithm Session::chokingAlgorithm() const
+{
+    return m_chokingAlgorithm;
+}
+
+void Session::setChokingAlgorithm(ChokingAlgorithm mode)
+{
+    if (mode == m_chokingAlgorithm) return;
+
+    m_chokingAlgorithm = mode;
+    configureDeferred();
+}
+
+SeedChokingAlgorithm Session::seedChokingAlgorithm() const
+{
+    return m_seedChokingAlgorithm;
+}
+
+void Session::setSeedChokingAlgorithm(SeedChokingAlgorithm mode)
+{
+    if (mode == m_seedChokingAlgorithm) return;
+
+    m_seedChokingAlgorithm = mode;
+    configureDeferred();
 }
 
 bool Session::isAddTrackersEnabled() const
@@ -2683,7 +2928,7 @@ void Session::setMaxConnectionsPerTorrent(int max)
             try {
                 handle.set_max_connections(max);
             }
-            catch(std::exception) {}
+            catch (std::exception) {}
         }
     }
 }
@@ -2705,7 +2950,7 @@ void Session::setMaxUploadsPerTorrent(int max)
             try {
                 handle.set_max_uploads(max);
             }
-            catch(std::exception) {}
+            catch (std::exception) {}
         }
     }
 }
@@ -2723,27 +2968,27 @@ void Session::setAnnounceToAllTrackers(bool val)
     }
 }
 
-uint Session::diskCacheSize() const
+int Session::diskCacheSize() const
 {
-    uint size = m_diskCacheSize;
+    int size = m_diskCacheSize;
     // These macros may not be available on compilers other than MSVC and GCC
 #if defined(__x86_64__) || defined(_M_X64)
-    size = qMin(size, 4096u);  // 4GiB
+    size = qMin(size, 4096);  // 4GiB
 #else
     // When build as 32bit binary, set the maximum at less than 2GB to prevent crashes
     // allocate 1536MiB and leave 512MiB to the rest of program data in RAM
-    size = qMin(size, 1536u);
+    size = qMin(size, 1536);
 #endif
     return size;
 }
 
-void Session::setDiskCacheSize(uint size)
+void Session::setDiskCacheSize(int size)
 {
 #if defined(__x86_64__) || defined(_M_X64)
-    size = qMin(size, 4096u);  // 4GiB
+    size = qMin(size, 4096);  // 4GiB
 #else
     // allocate 1536MiB and leave 512MiB to the rest of program data in RAM
-    size = qMin(size, 1536u);
+    size = qMin(size, 1536);
 #endif
     if (size != m_diskCacheSize) {
         m_diskCacheSize = size;
@@ -2751,12 +2996,12 @@ void Session::setDiskCacheSize(uint size)
     }
 }
 
-uint Session::diskCacheTTL() const
+int Session::diskCacheTTL() const
 {
     return m_diskCacheTTL;
 }
 
-void Session::setDiskCacheTTL(uint ttl)
+void Session::setDiskCacheTTL(int ttl)
 {
     if (ttl != m_diskCacheTTL) {
         m_diskCacheTTL = ttl;
@@ -2775,6 +3020,71 @@ void Session::setUseOSCache(bool use)
         m_useOSCache = use;
         configureDeferred();
     }
+}
+
+bool Session::isGuidedReadCacheEnabled() const
+{
+    return m_guidedReadCacheEnabled;
+}
+
+void Session::setGuidedReadCacheEnabled(bool enabled)
+{
+    if (enabled == m_guidedReadCacheEnabled) return;
+
+    m_guidedReadCacheEnabled = enabled;
+    configureDeferred();
+}
+
+bool Session::isSuggestModeEnabled() const
+{
+    return m_isSuggestMode;
+}
+
+void Session::setSuggestMode(bool mode)
+{
+    if (mode == m_isSuggestMode) return;
+
+    m_isSuggestMode = mode;
+    configureDeferred();
+}
+
+int Session::sendBufferWatermark() const
+{
+    return m_sendBufferWatermark;
+}
+
+void Session::setSendBufferWatermark(int value)
+{
+    if (value == m_sendBufferWatermark) return;
+
+    m_sendBufferWatermark = value;
+    configureDeferred();
+}
+
+int Session::sendBufferLowWatermark() const
+{
+    return m_sendBufferLowWatermark;
+}
+
+void Session::setSendBufferLowWatermark(int value)
+{
+    if (value == m_sendBufferLowWatermark) return;
+
+    m_sendBufferLowWatermark = value;
+    configureDeferred();
+}
+
+int Session::sendBufferWatermarkFactor() const
+{
+    return m_sendBufferWatermarkFactor;
+}
+
+void Session::setSendBufferWatermarkFactor(int value)
+{
+    if (value == m_sendBufferWatermarkFactor) return;
+
+    m_sendBufferWatermarkFactor = value;
+    configureDeferred();
 }
 
 bool Session::isAnonymousModeEnabled() const
@@ -2861,12 +3171,12 @@ void Session::setIgnoreSlowTorrentsForQueueing(bool ignore)
     }
 }
 
-uint Session::outgoingPortsMin() const
+int Session::outgoingPortsMin() const
 {
     return m_outgoingPortsMin;
 }
 
-void Session::setOutgoingPortsMin(uint min)
+void Session::setOutgoingPortsMin(int min)
 {
     if (min != m_outgoingPortsMin) {
         m_outgoingPortsMin = min;
@@ -2874,12 +3184,12 @@ void Session::setOutgoingPortsMin(uint min)
     }
 }
 
-uint Session::outgoingPortsMax() const
+int Session::outgoingPortsMax() const
 {
     return m_outgoingPortsMax;
 }
 
-void Session::setOutgoingPortsMax(uint max)
+void Session::setOutgoingPortsMax(int max)
 {
     if (max != m_outgoingPortsMax) {
         m_outgoingPortsMax = max;
@@ -2981,17 +3291,20 @@ void Session::setMaxUploads(int max)
     }
 }
 
-bool Session::isUTPEnabled() const
+BTProtocol Session::btProtocol() const
 {
-    return m_isUTPEnabled;
+    return m_btProtocol;
 }
 
-void Session::setUTPEnabled(bool enabled)
+void Session::setBTProtocol(BTProtocol protocol)
 {
-    if (enabled != m_isUTPEnabled) {
-        m_isUTPEnabled = enabled;
-        configureDeferred();
-    }
+    if ((protocol < BTProtocol::Both) || (BTProtocol::UTP < protocol))
+        return;
+
+    if (protocol == m_btProtocol) return;
+
+    m_btProtocol = protocol;
+    configureDeferred();
 }
 
 bool Session::isUTPRateLimited() const
@@ -3005,6 +3318,32 @@ void Session::setUTPRateLimited(bool limited)
         m_isUTPRateLimited = limited;
         configureDeferred();
     }
+}
+
+MixedModeAlgorithm Session::utpMixedMode() const
+{
+    return m_utpMixedMode;
+}
+
+void Session::setUtpMixedMode(MixedModeAlgorithm mode)
+{
+    if (mode == m_utpMixedMode) return;
+
+    m_utpMixedMode = mode;
+    configureDeferred();
+}
+
+bool Session::multiConnectionsPerIpEnabled() const
+{
+    return m_multiConnectionsPerIpEnabled;
+}
+
+void Session::setMultiConnectionsPerIpEnabled(bool enabled)
+{
+    if (enabled == m_multiConnectionsPerIpEnabled) return;
+
+    m_multiConnectionsPerIpEnabled = enabled;
+    configureDeferred();
 }
 
 bool Session::isTrackerFilteringEnabled() const
@@ -3176,7 +3515,7 @@ void Session::handleTorrentFinished(TorrentHandle *const torrent)
         if (torrentRelpath.endsWith(".torrent", Qt::CaseInsensitive)) {
             qDebug("Found possible recursive torrent download.");
             const QString torrentFullpath = torrent->savePath(true) + "/" + torrentRelpath;
-            qDebug("Full subtorrent path is %s", qPrintable(torrentFullpath));
+            qDebug("Full subtorrent path is %s", qUtf8Printable(torrentFullpath));
             TorrentInfo torrentInfo = TorrentInfo::loadFromFile(torrentFullpath);
             if (torrentInfo.isValid()) {
                 qDebug("emitting recursiveTorrentDownloadPossible()");
@@ -3697,9 +4036,7 @@ void Session::handleTorrentRemovedAlert(libt::torrent_removed_alert *p)
 
 void Session::handleTorrentDeletedAlert(libt::torrent_deleted_alert *p)
 {
-    const QString path = m_savePathsToRemove.take(p->info_hash);
-    if (path == torrentTempPath(p->info_hash))
-        Utils::Fs::smartRemoveEmptyFolderTree(path);
+    Utils::Fs::smartRemoveEmptyFolderTree(m_savePathsToRemove.take(p->info_hash));
 }
 
 void Session::handleTorrentDeleteFailedAlert(libt::torrent_delete_failed_alert *p)
@@ -3901,7 +4238,11 @@ void Session::handleSessionStatsAlert(libt::session_stats_alert *p)
             ? static_cast<qreal>(p->values[m_metricIndices.disk.numBlocksCacheHits]) / numBlocksRead
             : -1;
     m_cacheStatus.jobQueueLength = p->values[m_metricIndices.disk.queuedDiskJobs];
-    m_cacheStatus.averageJobTime = p->values[m_metricIndices.disk.diskJobTime];
+
+    quint64 totalJobs = p->values[m_metricIndices.disk.writeJobs] + p->values[m_metricIndices.disk.readJobs]
+                  + p->values[m_metricIndices.disk.hashJobs];
+    m_cacheStatus.averageJobTime = totalJobs > 0
+                                   ? (p->values[m_metricIndices.disk.diskJobTime] / totalJobs) : 0;
 
     emit statsUpdated();
 }
@@ -3985,7 +4326,7 @@ namespace
     {
         QFile file(path);
         if (!file.open(QIODevice::ReadOnly)) {
-            qDebug("Cannot read file %s: %s", qPrintable(path), qPrintable(file.errorString()));
+            qDebug("Cannot read file %s: %s", qUtf8Printable(path), qUtf8Printable(file.errorString()));
             return false;
         }
 
@@ -4080,4 +4421,32 @@ namespace
             qDebug() << Q_FUNC_INFO << " fails: " << exc.what();
         }
     }
+
+#ifdef Q_OS_WIN
+    QString convertIfaceNameToGuid(const QString &name)
+    {
+        // Under Windows XP or on Qt version <= 5.5 'name' will be a GUID already.
+        QUuid uuid(name);
+        if (!uuid.isNull())
+            return uuid.toString().toUpper(); // Libtorrent expects the GUID in uppercase
+
+        using PCONVERTIFACENAMETOLUID = NETIO_STATUS (WINAPI *)(const WCHAR *, PNET_LUID);
+        PCONVERTIFACENAMETOLUID ConvertIfaceNameToLuid = reinterpret_cast<PCONVERTIFACENAMETOLUID>(::GetProcAddress(::GetModuleHandleW(L"Iphlpapi.dll"), "ConvertInterfaceNameToLuidW"));
+        if (!ConvertIfaceNameToLuid) return QString();
+
+        using PCONVERTIFACELUIDTOGUID = NETIO_STATUS (WINAPI *)(const NET_LUID *, GUID *);
+        PCONVERTIFACELUIDTOGUID ConvertIfaceLuidToGuid = reinterpret_cast<PCONVERTIFACELUIDTOGUID>(::GetProcAddress(::GetModuleHandleW(L"Iphlpapi.dll"), "ConvertInterfaceLuidToGuid"));
+        if (!ConvertIfaceLuidToGuid) return QString();
+
+        NET_LUID luid;
+        LONG res = ConvertIfaceNameToLuid(name.toStdWString().c_str(), &luid);
+        if (res == 0) {
+            GUID guid;
+            if (ConvertIfaceLuidToGuid(&luid, &guid) == 0)
+                return QUuid(guid).toString().toUpper();
+        }
+
+        return QString();
+    }
+#endif
 }

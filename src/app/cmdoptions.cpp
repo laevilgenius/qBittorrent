@@ -417,7 +417,7 @@ QBtCommandLineParameters parseCommandLine(const QStringList &args)
             else if (arg == WEBUI_PORT_OPTION) {
                 result.webUiPort = WEBUI_PORT_OPTION.value(arg);
                 if ((result.webUiPort < 1) || (result.webUiPort > 65535))
-                    throw CommandLineParameterError(QObject::tr("%1 must specify the correct port (1 to 65535).")
+                    throw CommandLineParameterError(QObject::tr("%1 must specify a valid port (1 to 65535).")
                                                     .arg(QLatin1String("--webui-port")));
             }
 #ifndef DISABLE_GUI
@@ -523,11 +523,11 @@ QString makeUsage(const QString &prgName)
 
     stream << QObject::tr("Options:") << '\n';
 #ifndef Q_OS_WIN
-    stream << SHOW_VERSION_OPTION.usage() << wrapText(QObject::tr("Displays program version and exit")) << '\n';
+    stream << SHOW_VERSION_OPTION.usage() << wrapText(QObject::tr("Display program version and exit")) << '\n';
 #endif
-    stream << SHOW_HELP_OPTION.usage() << wrapText(QObject::tr("Displays this help message and exit")) << '\n';
+    stream << SHOW_HELP_OPTION.usage() << wrapText(QObject::tr("Display this help message and exit")) << '\n';
     stream << WEBUI_PORT_OPTION.usage(QObject::tr("port"))
-           << wrapText(QObject::tr("Changes the Web UI port"))
+           << wrapText(QObject::tr("Change the Web UI port"))
            << '\n';
 #ifndef DISABLE_GUI
     stream << NO_SPLASH_OPTION.usage() << wrapText(QObject::tr("Disable splash screen")) << '\n';
@@ -544,8 +544,8 @@ QString makeUsage(const QString &prgName)
                                          "to the profile directory")) << '\n';
     stream << PORTABLE_OPTION.usage()
            << wrapText(QObject::tr("Shortcut for --profile=<exe dir>/profile --relative-fastresume")) << '\n';
-    stream << Option::padUsageText(QObject::tr("files or urls"))
-           << wrapText(QObject::tr("Downloads the torrents passed by the user")) << '\n'
+    stream << Option::padUsageText(QObject::tr("files or URLs"))
+           << wrapText(QObject::tr("Download the torrents passed by the user")) << '\n'
            << '\n';
 
     stream << wrapText(QObject::tr("Options when adding new torrents:"), 0) << '\n';
@@ -559,7 +559,7 @@ QString makeUsage(const QString &prgName)
     stream << FIRST_AND_LAST_OPTION.usage()
            << wrapText(QObject::tr("Download first and last pieces first")) << '\n';
     stream << SKIP_DIALOG_OPTION.usage()
-           << wrapText(QObject::tr("Specifies whether the \"Add New Torrent\" dialog opens when adding a "
+           << wrapText(QObject::tr("Specify whether the \"Add New Torrent\" dialog opens when adding a "
                                    "torrent.")) << '\n';
     stream << '\n';
 
